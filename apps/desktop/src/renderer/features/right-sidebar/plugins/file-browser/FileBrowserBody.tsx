@@ -103,14 +103,29 @@ const BODY_MIN_RESERVE = 100;
 interface FileBrowserBodyProps {
   state: FileBrowserState;
   ctx: TabKindHostContext;
+  active?: boolean;
+  shellVisible?: boolean;
 }
 
-export function FileBrowserBody({ state, ctx }: FileBrowserBodyProps) {
+export function FileBrowserBody({
+  state,
+  ctx,
+  active = true,
+  shellVisible = true,
+}: FileBrowserBodyProps) {
   const { workdir } = ctx;
   if (!workdir) {
     return <NoWorkdirPlaceholder />;
   }
-  return <FileBrowserBodyWithWorkdir state={state} ctx={ctx} workdir={workdir} />;
+  return (
+    <FileBrowserBodyWithWorkdir
+      state={state}
+      ctx={ctx}
+      workdir={workdir}
+      active={active}
+      shellVisible={shellVisible}
+    />
+  );
 }
 
 /**
@@ -122,6 +137,8 @@ function FileBrowserBodyWithWorkdir({
   state,
   ctx,
   workdir,
+  active = true,
+  shellVisible = true,
 }: FileBrowserBodyProps & { workdir: string }) {
   const { t } = useTranslation();
   // 会话归属三路:local / SSH(remoteHostId)/ device-link(deviceId)。
@@ -575,6 +592,7 @@ function FileBrowserBodyWithWorkdir({
           relPath={activeRelPath}
           content={activeContent}
           allowEdit={!externalFile}
+          shortcutsEnabled={active && shellVisible}
           onSaved={externalFile ? undefined : fileContent.setLocal}
         />
       </div>
