@@ -27,7 +27,7 @@
  *   是更完善的方案,先按当前阶段处理)。
  *
  * Local Ctrl+F search:
- *   While this view is mounted, Ctrl/Cmd+F is captured at window level (in
+ *   While this view owns shortcuts, Ctrl/Cmd+F is captured at window level (in
  *   capture phase, with stopImmediatePropagation) so the global FindInPageBar
  *   never sees it for doc content. A floating DocSearchBar appears at top-
  *   right next to the edit button. Search backend is PlaintextEditor:
@@ -148,6 +148,8 @@ export interface FileBodyViewProps {
   content: FileContent;
   /** false = 只读预览,用于侧边栏拖入工程外文件等不应隐式写盘的入口。 */
   allowEdit?: boolean;
+  /** 右侧栏隐藏或收起时关闭文件级快捷键，避免多个挂载实例抢占全局按键。 */
+  shortcutsEnabled?: boolean;
   /**
    * 保存成功后回调,把 disk 上的最新数据回传给父层 useFileContent.setLocal。
    * 同步推 cache + state,避免 refresh() 走 IPC 时闪一帧空白。
@@ -194,6 +196,7 @@ export const FileBodyView = forwardRef<FileBodyHandle, FileBodyViewProps>(functi
     content,
     onSaved,
     allowEdit = true,
+    shortcutsEnabled = true,
     jumpQuery,
     jumpLine,
     onSearchJumpConsumed,
@@ -536,9 +539,10 @@ export const FileBodyView = forwardRef<FileBodyHandle, FileBodyViewProps>(functi
   // 组合键。事件通过 window CustomEvent 派发给同路由下的 WorkdirBrowseSidebar,
   // 解耦两侧组件。
   useEffect(() => {
+    if (!shortcutsEnabled) return;
     const release = acquireFindInPage();
     return () => release();
-  }, []);
+  }, [shortcutsEnabled]);
 
   // Bail when an app-level mermaid source modal is open. The modal mounts
   // AFTER us so any capture listener it registers can't preempt our
@@ -559,7 +563,7 @@ export const FileBodyView = forwardRef<FileBodyHandle, FileBodyViewProps>(functi
       });
       return true;
     },
-    { stopImmediate: true },
+    { enabled: shortcutsEnabled, stopImmediate: true },
   );
 
   useAppShortcut(
@@ -569,7 +573,7 @@ export const FileBodyView = forwardRef<FileBodyHandle, FileBodyViewProps>(functi
       window.dispatchEvent(new CustomEvent('workdir-open-project-search'));
       return true;
     },
-    { stopImmediate: true },
+    { enabled: shortcutsEnabled, stopImmediate: true },
   );
 
   // ── save-file → 写盘 (默认 Ctrl/⌘+S) ────────────────────────────────────
@@ -586,7 +590,7 @@ export const FileBodyView = forwardRef<FileBodyHandle, FileBodyViewProps>(functi
       if (!saving) void writeToDisk();
       return true;
     },
-    { stopImmediate: true },
+    { enabled: shortcutsEnabled, stopImmediate: true },
   );
 
   // ── Search runner ───────────────────────────────────────────────────────
