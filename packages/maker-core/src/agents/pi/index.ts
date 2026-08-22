@@ -120,6 +120,7 @@ import {
 import { resolveAgentCredentialMode } from '../credential-mode.js';
 import { PiRpcProcess, type PiRpcEvent } from './rpc-client.js';
 import { createPiStdioTransport, type PiTransport } from './transport.js';
+import { resolveWindowsGitPath } from './windows-git-path.js';
 import type { PiRemoteFileOps } from '../base-agent.js';
 import { capturePiRuntimeCapabilityManifest } from './runtime-capabilities.js';
 import {
@@ -170,6 +171,33 @@ const REMOTE_PI_ATTACHMENT_MAX_BYTES = 256 * 1024;
  * behavior without making the token derivable from the public session id alone.
  */
 const PI_PROXY_SESSION_TOKEN_KEY = randomBytes(32);
+
+/**
+ * Add the host's Windows Git directories to the Pi spawn environment without
+ * changing environment-key casing or making PATH discovery a startup blocker.
+ */
+export function applyWindowsGitPathFallback(
+  spawnEnv: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+  resolver: typeof resolveWindowsGitPath = resolveWindowsGitPath,
+): void {
+  if (platform !== 'win32') return;
+  const pathKey = Object.keys(spawnEnv).find((key) => key.toLowerCase() === 'path');
+  const existingPath = pathKey === undefined ? undefined : spawnEnv[pathKey];
+  try {
+    const resolvedPath = resolver({ platform, existingPath });
+    if (pathKey !== undefined) {
+      for (const key of Object.keys(spawnEnv)) {
+        if (key !== pathKey && key.toLowerCase() === 'path') delete spawnEnv[key];
+      }
+      spawnEnv[pathKey] = resolvedPath;
+    } else if (resolvedPath !== '') {
+      spawnEnv.Path = resolvedPath;
+    }
+  } catch {
+    // Git discovery is best-effort; Pi must still start with its original PATH.
+  }
+}
 
 /**
  * baseUrl 是否指向本机 loopback(远端会话不可达)。与 host 侧 isLoopbackUrl 同口径:
@@ -2082,6 +2110,7 @@ export class PiAgent extends BaseAgent {
           .slice(0, 16);
       }
       mergeLoopbackNoProxy(spawnEnv);
+      if (!remote) applyWindowsGitPathFallback(spawnEnv);
       const initialHostProxyForward = nativeProviderById.get(initialProvider)?.hostProxyForward;
       const { transport } = await this.createTransport(
         {

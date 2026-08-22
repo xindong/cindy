@@ -41,6 +41,14 @@ const captured = vi.hoisted(() => ({
   closed: false,
 }));
 
+const windowsGitPath = vi.hoisted(() => ({
+  resolve: vi.fn(),
+}));
+
+vi.mock('../windows-git-path.js', () => ({
+  resolveWindowsGitPath: (options: unknown) => windowsGitPath.resolve(options),
+}));
+
 vi.mock('../transport.js', () => ({
   createPiStdioTransport: (opts: {
     args: string[];
@@ -104,7 +112,7 @@ vi.mock('../rpc-client.js', () => ({
   },
 }));
 
-import { PiAgent } from '../index.js';
+import { applyWindowsGitPathFallback, PiAgent } from '../index.js';
 import type { AgentDeps, AgentSessionHandle } from '../../base-agent.js';
 import type { Logger } from '../../../interfaces/logger.js';
 import {
@@ -146,6 +154,7 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     captured.onAfterSetModel = null;
     captured.holdSetModel = null;
     captured.closed = false;
+    windowsGitPath.resolve.mockReset();
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-dispatch-home-'));
     cwd = mkdtempSync(path.join(tmpdir(), 'pi-dispatch-cwd-'));
     managedRipgrepPath = path.join(
@@ -329,6 +338,84 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
       expect(noProxy).toContain(entry);
     }
     expect(captured.env.no_proxy).toBeUndefined();
+  });
+
+  it('adds the Windows Git PATH while preserving the existing Path key casing', () => {
+    const spawnEnv: NodeJS.ProcessEnv = { Path: 'C:\\Windows;C:\\Tools' };
+    applyWindowsGitPathFallback(spawnEnv, 'win32', ({ existingPath }) => `${existingPath};C:\\Git\\cmd`);
+
+    expect(spawnEnv).toEqual({ Path: 'C:\\Windows;C:\\Tools;C:\\Git\\cmd' });
+    expect(Object.keys(spawnEnv).filter((key) => key.toLowerCase() === 'path')).toEqual(['Path']);
+  });
+
+  it('passes the resolver-expanded Windows PATH to the Pi spawn environment', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const originalPath = process.env.PATH;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    windowsGitPath.resolve.mockImplementation(({ existingPath }: { existingPath?: string }) =>
+      `${existingPath ?? ''};C:\\Git\\cmd`);
+    try {
+      await start();
+
+      expect(captured.env.PATH).toBe(`${originalPath};C:\\Git\\cmd`);
+      expect(captured.env.Path).toBeUndefined();
+      expect(windowsGitPath.resolve).toHaveBeenCalledWith({
+        platform: 'win32',
+        existingPath: originalPath,
+      });
+    } finally {
+      if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+    }
+  });
+
+  it('starts with the original Windows PATH when the resolver throws', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const originalPath = process.env.PATH;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    windowsGitPath.resolve.mockImplementation(() => { throw new Error('registry unavailable'); });
+    try {
+      await start();
+
+      expect(captured.env.PATH).toBe(originalPath);
+      expect(captured.env.Path).toBeUndefined();
+    } finally {
+      if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+    }
+  });
+
+  it('updates a lowercase PATH in place and does not create a second casing', () => {
+    const spawnEnv: NodeJS.ProcessEnv = { PATH: 'C:\\Windows' };
+    applyWindowsGitPathFallback(spawnEnv, 'win32', () => 'C:\\Windows;C:\\Git\\cmd');
+
+    expect(spawnEnv).toEqual({ PATH: 'C:\\Windows;C:\\Git\\cmd' });
+    expect(Object.keys(spawnEnv).filter((key) => key.toLowerCase() === 'path')).toEqual(['PATH']);
+  });
+
+  it('removes a duplicate Path casing when normalizing a Windows environment', () => {
+    const spawnEnv: NodeJS.ProcessEnv = { Path: 'C:\\Windows', PATH: 'C:\\Other' };
+    applyWindowsGitPathFallback(spawnEnv, 'win32', ({ existingPath }) => `${existingPath};C:\\Git\\cmd`);
+
+    expect(spawnEnv).toEqual({ Path: 'C:\\Windows;C:\\Git\\cmd' });
+    expect(Object.keys(spawnEnv).filter((key) => key.toLowerCase() === 'path')).toEqual(['Path']);
+  });
+
+  it('fails open when Windows Git discovery throws and leaves the original PATH', () => {
+    const spawnEnv: NodeJS.ProcessEnv = { Path: 'C:\\Windows' };
+    applyWindowsGitPathFallback(spawnEnv, 'win32', () => { throw new Error('registry unavailable'); });
+
+    expect(spawnEnv).toEqual({ Path: 'C:\\Windows' });
+  });
+
+  it('does not call the resolver or change env on non-Windows platforms', () => {
+    const spawnEnv: NodeJS.ProcessEnv = { PATH: '/usr/bin' };
+    let called = false;
+    applyWindowsGitPathFallback(spawnEnv, 'linux', () => {
+      called = true;
+      return '/usr/bin:/opt/git/bin';
+    });
+
+    expect(called).toBe(false);
+    expect(spawnEnv).toEqual({ PATH: '/usr/bin' });
   });
 
   it('locks Review sessions to the local read-only tool surface without memory, MCP, or subagents', async () => {
