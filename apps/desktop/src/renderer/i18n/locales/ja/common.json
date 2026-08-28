@@ -2260,6 +2260,10 @@
           "label": "ファイルを保存",
           "description": "編集中のドキュメントをディスクに保存します"
         },
+        "show-in-explorer": {
+          "label": "ファイルマネージャーで開く",
+          "description": "現在のローカルプロジェクトのディレクトリをシステムのファイルマネージャーで開きます"
+        },
         "zoom-in": {
           "label": "拡大",
           "description": "アプリの表示を拡大します"
@@ -5301,6 +5305,7 @@
         "moveToProjectAttachedBlocked": "このセッションはリモート操作中です。操作終了後に移動してください。",
         "moveToProjectRemoteUnsupported": "リモートセッションの移動はまだサポートされていません",
         "openInNewWindow": "新しいウィンドウで開く",
+        "openInExplorer": "ファイルマネージャーで開く",
         "exportShare": "セッションをエクスポート…",
         "copySessionLink": "チャットリンクをコピー"
       },

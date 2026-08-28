@@ -69,6 +69,7 @@ import { RemoteProjectIcon } from './RemoteProjectIcon';
 import { isRemoteSessionWriteBlocked } from '../lib/remoteSessionWriteGuard';
 import { useSessionBoundSchedules, scheduleFocusPath } from '@/features/scheduler/lib/scheduleSessionBinding';
 import { loadScheduleSidebarIndexRuns } from '@/features/scheduler/lib/scheduleSidebarIndexRuns';
+import { ShowInExplorerMenuItem } from './ShowInExplorerMenuItem';
 
 const log = createLogger('SessionCard');
 
@@ -340,6 +341,27 @@ export function SessionCard({
     void window.electronAPI.maker.openSessionInNewWindow(session.id);
   }, [remoteWritesBlocked, session.id, t]);
 
+  // 仅本地项目会话允许把 workingDir 交给系统文件管理器；远程会话的路径属于
+  // 被控端，不能在控制端误打开同名本地路径。
+  const canShowInExplorer =
+    session.workspaceKind === 'project' &&
+    Boolean(session.workingDir) &&
+    !session.remoteHostId &&
+    !session.deviceLinkDeviceId;
+  const handleShowInExplorerSelect = useCallback(async () => {
+    if (!canShowInExplorer || !session.workingDir) return;
+    setMenuPos(null);
+    try {
+      const result = await window.electronAPI.openPath(session.workingDir);
+      if (!result.success) {
+        toast.error(result.error || t('ccAgent.common.openFolderFailed'));
+      }
+    } catch (err) {
+      log.error('[show in explorer]', err);
+      toast.error(t('ccAgent.common.openFolderFailed'));
+    }
+  }, [canShowInExplorer, session.workingDir, t]);
+
   const handleAutomationIconClick = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
     try {
@@ -400,6 +422,14 @@ export function SessionCard({
         />
       </DropdownMenuSubContent>
     </DropdownMenuSub>
+  ) : null;
+
+  const showInExplorerMenuItem = canShowInExplorer ? (
+    <ShowInExplorerMenuItem
+      enabled={menuPos !== null}
+      label={t('ccAgent.sidebar.sessionMenu.openInExplorer')}
+      onSelect={handleShowInExplorerSelect}
+    />
   ) : null;
 
   const statusIconNode = (
@@ -832,6 +862,7 @@ export function SessionCard({
                 >
                   {t('ccAgent.sidebar.sessionMenu.unarchive')}
                 </DropdownMenuItem>
+                {showInExplorerMenuItem}
                 {copySessionIdSubmenu}
                 <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
                 <DropdownMenuItem
@@ -851,6 +882,7 @@ export function SessionCard({
                 >
                   {t('ccAgent.sidebar.sessionMenu.rename')}
                 </DropdownMenuItem>
+                {showInExplorerMenuItem}
                 {copySessionIdSubmenu}
                 <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
                 <DropdownMenuItem
@@ -879,6 +911,7 @@ export function SessionCard({
                 </DropdownMenuItem>
                 {moveToProjectSubmenu}
                 <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
+                {showInExplorerMenuItem}
                 {copySessionIdSubmenu}
                 <DropdownMenuItem
                   disabled={remoteWritesBlocked}

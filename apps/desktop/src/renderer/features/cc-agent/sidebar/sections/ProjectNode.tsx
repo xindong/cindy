@@ -57,6 +57,7 @@ import { RemoteProjectIcon } from '../RemoteProjectIcon';
 import { isDeviceLinkWriteBlocked } from '../../lib/remoteSessionWriteGuard';
 import { projectBulkArchiveActionForStatus } from '../../lib/projectBulkArchiveAction';
 import { getRemoteProjectMachineIdentity } from '../../lib/remoteProjectIdentity';
+import { ShowInExplorerMenuItem } from '../ShowInExplorerMenuItem';
 
 const log = createLogger('ProjectNode');
 
@@ -150,6 +151,7 @@ export function ProjectNode({
   const isDeviceLink = project.deviceLinkDeviceId != null;
   const remoteIdentity = getRemoteProjectMachineIdentity(project);
   const projectWritesBlocked = isDeviceLinkWriteBlocked(project);
+  const canShowInExplorer = !isRemote && !isDeviceLink && Boolean(project.workingDir);
   const bulkArchiveAction = projectBulkArchiveActionForStatus(statusFilter);
   // 项目图标两态(2026-07 用户定稿,参考 MivoCanvas):收起 Folder / 展开 FolderOpen,
   // 常驻在标题左侧;展开/收起指示箭头移到标题右侧、hover 才渐显(见下方 Chevron)。
@@ -221,6 +223,12 @@ export function ProjectNode({
     setMenuPos(null);
     onArchiveAll(project);
   }, [onArchiveAll, project, projectWritesBlocked, t]);
+
+  const handleOpenInExplorer = useCallback(() => {
+    if (!canShowInExplorer) return;
+    setMenuPos(null);
+    onOpenInExplorer(project.workingDir);
+  }, [canShowInExplorer, onOpenInExplorer, project.workingDir]);
 
   return (
     // 两个 data 属性各自服务不同消费者:
@@ -469,15 +477,13 @@ export function ProjectNode({
               >
                 {t('ccAgent.sidebar.projectAction.showFiles')}
               </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => {
-                  setMenuPos(null);
-                  onOpenInExplorer(project.workingDir);
-                }}
-                className={MENU_ITEM_CLASS}
-              >
-                {t('ccAgent.sidebar.projectAction.openInExplorer')}
-              </DropdownMenuItem>
+              {canShowInExplorer && (
+                <ShowInExplorerMenuItem
+                  enabled={menuPos !== null}
+                  label={t('ccAgent.sidebar.projectAction.openInExplorer')}
+                  onSelect={handleOpenInExplorer}
+                />
+              )}
               <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
               <DropdownMenuItem
                 onClick={() => {

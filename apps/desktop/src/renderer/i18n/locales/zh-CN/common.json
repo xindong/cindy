@@ -2260,6 +2260,10 @@
           "label": "保存文件",
           "description": "将正在编辑的文档写入磁盘"
         },
+        "show-in-explorer": {
+          "label": "在文件管理器中打开",
+          "description": "在系统文件管理器中打开当前本地项目目录"
+        },
         "zoom-in": {
           "label": "放大",
           "description": "放大应用界面"
@@ -5301,6 +5305,7 @@
         "moveToProjectAttachedBlocked": "对话正在被接管，结束接管后再移动",
         "moveToProjectRemoteUnsupported": "暂不支持移动远程对话",
         "openInNewWindow": "在新窗口打开",
+        "openInExplorer": "在文件管理器中打开",
         "exportShare": "导出对话…",
         "copySessionLink": "复制对话链接"
       },

@@ -2260,6 +2260,10 @@
           "label": "파일 저장",
           "description": "편집 중인 문서를 디스크에 저장합니다"
         },
+        "show-in-explorer": {
+          "label": "파일 관리자에서 열기",
+          "description": "현재 로컬 프로젝트 디렉터리를 시스템 파일 관리자에서 엽니다"
+        },
         "zoom-in": {
           "label": "확대",
           "description": "앱 화면을 확대합니다"
@@ -5301,6 +5305,7 @@
         "moveToProjectAttachedBlocked": "이 세션은 원격 연결 중입니다. 제어가 끝난 후 이동하세요.",
         "moveToProjectRemoteUnsupported": "원격 세션 이동은 아직 지원하지 않습니다",
         "openInNewWindow": "새 창에서 열기",
+        "openInExplorer": "파일 관리자에서 열기",
         "exportShare": "세션 내보내기…",
         "copySessionLink": "대화 링크 복사"
       },
