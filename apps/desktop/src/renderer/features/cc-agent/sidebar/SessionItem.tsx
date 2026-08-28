@@ -87,6 +87,7 @@ import { useSessionAttentionUrgency } from '../contexts/SessionAttentionUrgencyC
 import { useRemoteSessionActivity } from '@/features/device-link/remoteSessionActivityStore';
 import { resolveSidebarRightStatus } from './sidebarRightStatus';
 import { AutomationTimerIcon } from './AutomationTimerIcon';
+import { ShowInExplorerMenuItem } from './ShowInExplorerMenuItem';
 
 // Module-level dedup cache for loadScheduleSidebarIndexRuns.
 // When many ungrouped automation rows mount simultaneously they all need the
@@ -522,6 +523,27 @@ export const SessionItem = memo(function SessionItem({
     void window.electronAPI.maker.openSessionInNewWindow(session.id);
   }, [remoteWritesBlocked, session.id, t]);
 
+  // 仅本地项目会话允许把 workingDir 交给系统文件管理器；远程会话的路径属于
+  // 被控端，不能在控制端误打开同名本地路径。
+  const canShowInExplorer =
+    session.workspaceKind === 'project' &&
+    Boolean(session.workingDir) &&
+    !session.remoteHostId &&
+    !session.deviceLinkDeviceId;
+  const handleShowInExplorerSelect = useCallback(async () => {
+    if (!canShowInExplorer || !session.workingDir) return;
+    setMenuPos(null);
+    try {
+      const result = await window.electronAPI.openPath(session.workingDir);
+      if (!result.success) {
+        toast.error(result.error || t('ccAgent.common.openFolderFailed'));
+      }
+    } catch (err) {
+      log.error('[show in explorer]', err);
+      toast.error(t('ccAgent.common.openFolderFailed'));
+    }
+  }, [canShowInExplorer, session.workingDir, t]);
+
   // 复制 cindy://session/<id> 深度链接到剪贴板。三个变体(标准/Pinned/Archived/Draft)
   // 共用此 handler — sessionId 始终存在(draft 也是 DB-backed 的 Session row)。
   // 远程会话把归属设备冻进 `?device=`:发送时的引用解析不再依赖被控端此刻在线。
@@ -564,6 +586,14 @@ export const SessionItem = memo(function SessionItem({
     <DropdownMenuItem onSelect={handleExportShareSelect} className={MENU_ITEM_CLASS}>
       {t('ccAgent.sidebar.sessionMenu.exportShare')}
     </DropdownMenuItem>
+  ) : null;
+
+  const showInExplorerMenuItem = canShowInExplorer ? (
+    <ShowInExplorerMenuItem
+      enabled={menuPos !== null}
+      label={t('ccAgent.sidebar.sessionMenu.openInExplorer')}
+      onSelect={handleShowInExplorerSelect}
+    />
   ) : null;
 
   const moveToProjectSubmenu = canMoveToProject ? (
@@ -964,6 +994,7 @@ export const SessionItem = memo(function SessionItem({
                 >
                   {t('ccAgent.sidebar.sessionMenu.unarchive')}
                 </DropdownMenuItem>
+                {showInExplorerMenuItem}
                 {exportShareMenuItem}
                 {copySessionIdSubmenu}
                 <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
@@ -985,6 +1016,7 @@ export const SessionItem = memo(function SessionItem({
                 >
                   {t('ccAgent.sidebar.sessionMenu.rename')}
                 </DropdownMenuItem>
+                {showInExplorerMenuItem}
                 {copySessionIdSubmenu}
                 <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
                 <DropdownMenuItem
@@ -1016,6 +1048,7 @@ export const SessionItem = memo(function SessionItem({
                 </DropdownMenuItem>
                 {moveToProjectSubmenu}
                 <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
+                {showInExplorerMenuItem}
                 {copySessionIdSubmenu}
                 <DropdownMenuItem
                   disabled={remoteWritesBlocked}

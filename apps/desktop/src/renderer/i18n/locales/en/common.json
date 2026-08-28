@@ -2261,6 +2261,10 @@
           "label": "Save file",
           "description": "Write the document being edited to disk"
         },
+        "show-in-explorer": {
+          "label": "Show in file manager",
+          "description": "Open the current local project directory in the system file manager"
+        },
         "zoom-in": {
           "label": "Zoom in",
           "description": "Zoom in the app interface"
@@ -5311,6 +5315,7 @@
         "moveToProjectAttachedBlocked": "This session is being controlled remotely. Move it after control ends.",
         "moveToProjectRemoteUnsupported": "Moving remote sessions is not supported yet",
         "openInNewWindow": "Open in new window",
+        "openInExplorer": "Open in file manager",
         "exportShare": "Export session…",
         "copySessionLink": "Copy chat link"
       },

@@ -74,6 +74,7 @@ import { SessionShareExportDialog } from './sidebar/SessionShareExportDialog';
 import { useRemoteProjectSessions } from '@/features/device-link/remoteProjectsStore';
 import { isRemoteSessionWriteBlocked } from './lib/remoteSessionWriteGuard';
 import { Tip } from '@/components/ui/tooltip';
+import { ShowInExplorerMenuItem } from './sidebar/ShowInExplorerMenuItem';
 
 const log = createLogger('SessionContentHeader');
 
@@ -146,6 +147,11 @@ export function SessionContentHeader({
     !isEmpty && !session.remoteHostId && !session.deviceLinkDeviceId && !isArchived;
   const canExportShare =
     !isEmpty && !session.remoteHostId && !session.orcaRole && !session.deviceLinkDeviceId;
+  const canShowInExplorer =
+    session.workspaceKind === 'project' &&
+    Boolean(session.workingDir) &&
+    !session.remoteHostId &&
+    !session.deviceLinkDeviceId;
   const projectOptions = useProjectPickerOptions();
   // heartbeat schedule 绑定标识,与 SessionItem 同源数据;删除/过期后自动消失。
   const boundSchedules = useSessionBoundSchedules(session.id);
@@ -268,6 +274,29 @@ export function SessionContentHeader({
     }
     void window.electronAPI.maker.openSessionInNewWindow(session.id);
   }, [remoteWritesBlocked, session.id, showRemoteWriteBlockedToast]);
+
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const handleShowInExplorer = useCallback(async () => {
+    if (!canShowInExplorer || !session.workingDir) return;
+    setSessionMenuOpen(false);
+    try {
+      const result = await window.electronAPI.openPath(session.workingDir);
+      if (!result.success) {
+        toast.error(result.error || t('ccAgent.common.openFolderFailed'));
+      }
+    } catch (err) {
+      log.error('[show in explorer]', err);
+      toast.error(t('ccAgent.common.openFolderFailed'));
+    }
+  }, [canShowInExplorer, session.workingDir, t]);
+
+  const showInExplorerMenuItem = canShowInExplorer ? (
+    <ShowInExplorerMenuItem
+      enabled={sessionMenuOpen}
+      label={t('ccAgent.sidebar.sessionMenu.openInExplorer')}
+      onSelect={handleShowInExplorer}
+    />
+  ) : null;
 
   /* ---- 移动到项目 / 对话 ----
    * 与 CCAgentSidebarUpper.handleMoveSession 同款守卫(远程不支持 / 执行中 /
@@ -529,7 +558,7 @@ export function SessionContentHeader({
       )}
 
       {!isEditing && (
-        <DropdownMenu>
+        <DropdownMenu open={sessionMenuOpen} onOpenChange={setSessionMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button
               className={cn(
@@ -570,6 +599,7 @@ export function SessionContentHeader({
                 >
                   {t('ccAgent.sidebar.sessionMenu.unarchive')}
                 </DropdownMenuItem>
+                {showInExplorerMenuItem}
                 {canExportShare && (
                   <DropdownMenuItem
                     onSelect={() => setShareExportOpen(true)}
@@ -602,6 +632,7 @@ export function SessionContentHeader({
                 >
                   {t('ccAgent.sidebar.sessionMenu.rename')}
                 </DropdownMenuItem>
+                {showInExplorerMenuItem}
                 <DropdownMenuItem
                   onSelect={() => void handleCopyDeepLink()}
                   className={MENU_ITEM_CLASS}
@@ -670,6 +701,7 @@ export function SessionContentHeader({
                   </DropdownMenuSub>
                 )}
                 <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
+                {showInExplorerMenuItem}
                 <DropdownMenuItem
                   onSelect={() => void handleCopyDeepLink()}
                   className={MENU_ITEM_CLASS}

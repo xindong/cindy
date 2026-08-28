@@ -42,6 +42,7 @@ export const APP_SHORTCUT_IDS = [
   'find-in-page',
   'search-in-project',
   'save-file',
+  'show-in-explorer',
   'open-terminal',
   'zoom-in',
   'zoom-out',
@@ -211,6 +212,16 @@ export const APP_SHORTCUT_DEFINITIONS: ReadonlyArray<AppShortcutDefinition> = [
     rebindable: true,
     hiddenInSettings: true,
     getDefaultCombos: (platform) => [modCombo('KeyS', platform)],
+  },
+  // 仅在本地项目菜单打开时消费；菜单项用于把当前项目目录交给系统文件管理器。
+  {
+    id: 'show-in-explorer',
+    scope: 'app',
+    labelKey: 'settings.shortcuts.items.show-in-explorer.label',
+    descriptionKey: 'settings.shortcuts.items.show-in-explorer.description',
+    rebindable: false,
+    hiddenInSettings: true,
+    getDefaultCombos: (platform) => [modCombo('KeyS', platform, { shift: true })],
   },
   // 缩放三键: macOS 由系统菜单 role (resetZoom/zoomIn/zoomOut) 承担, 仅
   // win/linux 走 renderer 监听。多默认覆盖主键区与数字键盘 (与迁移前
