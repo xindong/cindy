@@ -70,3 +70,34 @@ export function collectRemoteProviderGroups(
   for (const key of groups.keys()) memberOf.delete(key);
   return { hidden: new Set(memberOf.keys()), groups, memberOf };
 }
+
+/** 任务此刻的 Agent 位置：哪台电脑(null = 任务所在电脑)上的哪个供应商。 */
+export interface ProviderGroupTaskRoute {
+  agentDeviceId: string | null;
+  providerId: string;
+}
+
+/**
+ * 任务正在组里哪台电脑上运行：组分好电脑后，任务记录改成那台的位置与供应商(provider-groups.md §6)，
+ * 所以逐台比对组内电脑。返回那台从任务所在电脑看的位置(null = 任务所在电脑)；不在组里任何一台上
+ * 返回 undefined。
+ *
+ * @param ownerDeviceId 组所在电脑；组就建在任务所在电脑上时传 null。
+ * @param taskDeviceId 任务所在电脑的设备 id：组员就是它时按「任务所在电脑」比。
+ */
+export function providerGroupMemberOfRoute(
+  config: ProviderGroupConfig,
+  ownerDeviceId: string | null,
+  route: ProviderGroupTaskRoute,
+  taskDeviceId: string | null,
+): ProviderGroupTaskRoute | undefined {
+  const atTask = (deviceId: string | null) => (deviceId && deviceId === taskDeviceId ? null : deviceId);
+  const routeDeviceId = atTask(route.agentDeviceId);
+  for (const member of config.members) {
+    const location = member.kind === 'local' ? ownerDeviceId : atTask(member.agentDeviceId);
+    if (location === routeDeviceId && member.providerId === route.providerId) {
+      return { agentDeviceId: location, providerId: member.providerId };
+    }
+  }
+  return undefined;
+}

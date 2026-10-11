@@ -5,7 +5,12 @@
 import type { ProviderView } from '@cindy/model-providers';
 import { describe, expect, it } from 'vitest';
 
-import { collectRemoteProviderGroups, remoteProviderEntryKey } from '../remoteProviderGroups';
+import {
+  collectRemoteProviderGroups,
+  providerGroupMemberOfRoute,
+  remoteProviderEntryKey,
+} from '../remoteProviderGroups';
+import type { ProviderGroupConfig } from '../../../shared/providerGroup';
 
 function provider(id: string, extra: Record<string, unknown> = {}): ProviderView {
   return { id, name: id, agents: ['claude-code'], connected: true, remoteInvocationEnabled: true, models: {}, routing: {}, ...extra } as unknown as ProviderView;
@@ -86,5 +91,44 @@ describe('collectRemoteProviderGroups', () => {
     ]);
     expect(result.hidden.size).toBe(0);
     expect(result.groups.size).toBe(0);
+  });
+});
+
+describe('providerGroupMemberOfRoute', () => {
+  const member = (kind: 'local' | 'device' | 'share', agentDeviceId: string | null, providerId: string) => ({
+    key: `${kind}:${agentDeviceId}:${providerId}`, kind, agentDeviceId, providerId, limit: 4, weight: 1, paused: false,
+  });
+  // Mini 上的组：Mini 自己、Studio、这台电脑(desk)、Kai 分享来的一台。
+  const config: ProviderGroupConfig = {
+    strategy: 'least',
+    autoSwitch: true,
+    members: [
+      member('local', null, 'anthropic'),
+      member('device', 'studio', 'anthropic-1a2b3c4d'),
+      member('device', 'desk', 'anthropic-9z'),
+      member('share', 'share:s1', 'anthropic'),
+    ],
+  };
+
+  it('finds the computer the task now runs on, seen from the task computer', () => {
+    const of = (agentDeviceId: string | null, providerId: string) =>
+      providerGroupMemberOfRoute(config, 'mini', { agentDeviceId, providerId }, 'desk');
+    expect(of('mini', 'anthropic')).toEqual({ agentDeviceId: 'mini', providerId: 'anthropic' });
+    expect(of('studio', 'anthropic-1a2b3c4d')).toEqual({ agentDeviceId: 'studio', providerId: 'anthropic-1a2b3c4d' });
+    expect(of('share:s1', 'anthropic')).toEqual({ agentDeviceId: 'share:s1', providerId: 'anthropic' });
+    // 组员就是任务所在电脑：任务记录里 Agent 位置为空(或写着自己)。
+    expect(of(null, 'anthropic-9z')).toEqual({ agentDeviceId: null, providerId: 'anthropic-9z' });
+    expect(of('desk', 'anthropic-9z')).toEqual({ agentDeviceId: null, providerId: 'anthropic-9z' });
+  });
+
+  it('does not match another provider on a member computer or a computer outside the group', () => {
+    expect(providerGroupMemberOfRoute(config, 'mini', { agentDeviceId: 'studio', providerId: 'openai' }, 'desk')).toBeUndefined();
+    expect(providerGroupMemberOfRoute(config, 'mini', { agentDeviceId: 'laptop', providerId: 'anthropic' }, 'desk')).toBeUndefined();
+    expect(providerGroupMemberOfRoute(config, 'mini', { agentDeviceId: null, providerId: 'anthropic' }, 'desk')).toBeUndefined();
+  });
+
+  it('treats the group computer itself as the task computer for a group built here', () => {
+    expect(providerGroupMemberOfRoute(config, null, { agentDeviceId: null, providerId: 'anthropic' }, 'mini'))
+      .toEqual({ agentDeviceId: null, providerId: 'anthropic' });
   });
 });

@@ -25,6 +25,8 @@ import {
   type ProviderShareMoney,
   type ProviderShareOwnerState,
   type ProviderShareUsageRange,
+  type ProviderOwnUsageView,
+  type ProviderPartyUsageView,
 } from '../../shared/providerShare.js';
 import { getDeviceId } from '../authManager.js';
 import { t } from '../i18n.js';
@@ -36,7 +38,12 @@ import { currentLedgerCurrency } from '../usage/ledgerCurrency.js';
 import { getGatewayModelPricing, getModelPriceQuote } from '../usage/modelPricing.js';
 import { computePriceQuoteTurnMoney, normalizeModelIdForPricing } from '../usage/turnCostCalculator.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
-import { providerShareActiveControllers, revokeProviderShareControllers, setProviderShareAccess } from './dispatch.js';
+import {
+  getControllerDisplayName,
+  providerShareActiveControllers,
+  revokeProviderShareControllers,
+  setProviderShareAccess,
+} from './dispatch.js';
 import { getDeviceLinkInvokeContext } from './invoke-context.js';
 import { fetchIdentityCard, providerShareApi, providerShareLinkFor, sha256Hex } from './providerShareApi.js';
 import {
@@ -64,7 +71,8 @@ import {
   stopProviderShareHost,
 } from './providerShareHost.js';
 import { getProviderShareUsageStore } from './providerShareUsageStore.js';
-import { readDeviceLinkSettings } from './settings-store.js';
+import { readDeviceLinkSettings, readLastKnownDeviceNames } from './settings-store.js';
+import { currentProviderPartyUsageStore, type ProviderPartyUsage } from '../usage/providerPartyUsageStore.js';
 
 const log = createLogger('provider-share');
 
@@ -202,15 +210,19 @@ function text(value: unknown, field: string, max = 256): string {
   return value.trim();
 }
 
+function usageRange(range: unknown): ProviderShareUsageRange {
+  if (range !== '7d' && range !== 'month' && range !== 'all') throwIpcError('INVALID_PARAMS', 'Invalid range');
+  return range;
+}
+
 function parseCommand(raw: unknown): ProviderShareCommand {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throwIpcError('INVALID_PARAMS', 'Invalid command');
   const value = raw as Record<string, unknown>;
   switch (value.action) {
-    case 'owned': {
-      const range = value.range;
-      if (range !== '7d' && range !== 'month' && range !== 'all') throwIpcError('INVALID_PARAMS', 'Invalid range');
-      return { action: 'owned', range };
-    }
+    case 'owned':
+      return { action: 'owned', range: usageRange(value.range) };
+    case 'own-usage':
+      return { action: 'own-usage', providerId: text(value.providerId, 'providerId'), range: usageRange(value.range) };
     case 'create-link':
       return { action: 'create-link', providerId: text(value.providerId, 'providerId') };
     case 'approve':
@@ -291,6 +303,35 @@ async function ownerState(range: ProviderShareUsageRange): Promise<ProviderShare
   };
 }
 
+/** 这个供应商按使用方的用量：本机与同账号的其他电脑(provider-groups.md §7)。只读本机账本，不经分享服务。 */
+async function ownUsage(providerId: string, range: ProviderShareUsageRange): Promise<ProviderOwnUsageView> {
+  const { local, devices } = currentProviderPartyUsageStore().query(providerId, range);
+  const lastKnownNames = readLastKnownDeviceNames();
+  const view = async (party: ProviderPartyUsage): Promise<ProviderPartyUsageView> => ({
+    deviceId: party.deviceId,
+    deviceName: party.deviceId
+      ? (getControllerDisplayName(party.deviceId) ?? lastKnownNames[party.deviceId] ?? null)
+      : null,
+    lastUsedAt: party.lastUsedAt,
+    models: await Promise.all(party.models.map(async (model) => ({
+      kind: model.kind,
+      providerId,
+      model: model.model,
+      turns: model.turns,
+      inputTokens: model.inputTokens,
+      outputTokens: model.outputTokens,
+      cacheReadTokens: model.cacheReadTokens,
+      cacheCreateTokens: model.cacheCreateTokens,
+      amount: await estimate({ ...model, providerId }),
+    }))),
+  });
+  return {
+    providerId,
+    local: local ? await view(local) : null,
+    devices: await Promise.all(devices.map(view)),
+  };
+}
+
 async function createLink(providerId: string): Promise<ProviderShareLinkCreated> {
   requireRunning();
   // 逐级开启：允许远程控制 → 允许被远程调用 → 分享。
@@ -323,6 +364,8 @@ async function execute(command: ProviderShareCommand): Promise<unknown> {
     case 'owned':
       if (running) markProviderShareHostActive(60_000);
       return ownerState(command.range);
+    case 'own-usage':
+      return ownUsage(command.providerId, command.range);
     case 'create-link':
       return createLink(command.providerId);
     case 'approve':

@@ -50,6 +50,9 @@ function makeHost(
     purge?: (ids: readonly string[], nativeIds: readonly string[]) => Promise<void>;
     events?: AgentEvent[];
     recordGuestUsage?: Parameters<typeof createRemoteAgentHost>[0]['recordGuestUsage'];
+    recordOwnerUsage?: Parameters<typeof createRemoteAgentHost>[0]['recordOwnerUsage'];
+    /** 任务开始时的账号是否仍是当前账号(缺省一直是)。 */
+    ownerCurrent?: () => boolean;
     providerAccess?: boolean;
     /** false = 不接受受邀者出站登记(旧接线)；缺省给一个记录调用的实现。 */
     bindGuestProviderRoute?: false | Parameters<typeof createRemoteAgentHost>[0]['bindGuestProviderRoute'];
@@ -111,9 +114,10 @@ function makeHost(
     }),
     ...(options.purge ? { purgeHostedTranscripts: options.purge } : {}),
     ...(options.recordGuestUsage ? { recordGuestUsage: options.recordGuestUsage } : {}),
+    ...(options.recordOwnerUsage ? { recordOwnerUsage: options.recordOwnerUsage } : {}),
     ...(bindGuestProviderRoute ? { bindGuestProviderRoute } : {}),
     captureOwner: () => 'owner',
-    isOwnerCurrent: () => true,
+    isOwnerCurrent: () => options.ownerCurrent?.() ?? true,
     runsRoot,
   });
 }
@@ -510,14 +514,15 @@ describe('guest provider access and usage', () => {
     host.dispose();
   });
 
-  it('meters guest turns with the resolved provider and leaves same-account runs unmetered', async () => {
+  it('meters guest turns into the guest ledger and same-account turns into the owner ledger', async () => {
     const done = {
       type: 'done',
       data: { modelUsageCumulativeStartsAtZero: true, modelUsage: { 'claude-opus': { inputTokens: 12, outputTokens: 3, costUSD: 0.02 } } },
     } as unknown as AgentEvent;
     const recordGuestUsage = vi.fn();
+    const recordOwnerUsage = vi.fn();
     const started: Started[] = [];
-    const host = makeHost(started, { events: [done], recordGuestUsage });
+    const host = makeHost(started, { events: [done], recordGuestUsage, recordOwnerUsage });
     await host.handle(GUEST, { op: 'open', runId: RUN_1, agentKind: 'claude-code', payload: { json: openPayload('task-1') } });
     await host.handle(OWNER, { op: 'open', runId: RUN_2, agentKind: 'claude-code', payload: { json: openPayload('task-2') } });
     // open 只登记任务，启动与事件泵在后台继续；Windows 全量分片繁忙时不能用 waitFor 的
@@ -532,13 +537,33 @@ describe('guest provider access and usage', () => {
         expect(events).toContain('"t":"event","event":{"type":"done"');
       }
     }, { timeout: 10_000 });
-    expect(recordGuestUsage).toHaveBeenCalledTimes(1);
-    expect(recordGuestUsage).toHaveBeenCalledWith(GUEST, {
+    const usage = {
       kind: 'claude-code',
       providerId: 'shared-provider',
       samples: [{ model: 'claude-opus', turns: 1, inputTokens: 12, outputTokens: 3, cacheReadTokens: 0, cacheCreateTokens: 0, sdkCostUsd: 0.02 }],
-    });
+    };
+    expect(recordGuestUsage).toHaveBeenCalledTimes(1);
+    expect(recordGuestUsage).toHaveBeenCalledWith(GUEST, usage);
+    expect(recordOwnerUsage).toHaveBeenCalledTimes(1);
+    expect(recordOwnerUsage).toHaveBeenCalledWith(OWNER, usage);
     expect(host.activeControllers().sort()).toEqual([GUEST, OWNER].sort());
+    host.dispose();
+  });
+
+  it('does not record a late turn after the account changed', async () => {
+    const done = {
+      type: 'done',
+      data: { modelUsageCumulativeStartsAtZero: true, modelUsage: { 'claude-opus': { inputTokens: 12, outputTokens: 3, costUSD: 0.02 } } },
+    } as unknown as AgentEvent;
+    const recordOwnerUsage = vi.fn();
+    const started: Started[] = [];
+    const host = makeHost(started, { events: [done], recordOwnerUsage, ownerCurrent: () => false });
+    await host.handle(OWNER, { op: 'open', runId: RUN_2, agentKind: 'claude-code', payload: { json: openPayload('task-2') } });
+    await vi.waitFor(async () => {
+      const poll = await host.handle(OWNER, { op: 'poll', runs: [{ runId: RUN_2, cursor: 0 }], waitMs: 0 }) as { runs: Array<{ data?: string }> };
+      expect(Buffer.from(poll.runs[0]?.data ?? '', 'base64').toString('utf8')).toContain('"t":"event","event":{"type":"done"');
+    }, { timeout: 10_000 });
+    expect(recordOwnerUsage).not.toHaveBeenCalled();
     host.dispose();
   });
 

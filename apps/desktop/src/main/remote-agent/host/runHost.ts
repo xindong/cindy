@@ -171,6 +171,8 @@ export interface RemoteAgentHostDeps {
   purgeHostedTranscripts?(hostSessionIds: readonly string[], nativeIds: readonly string[]): Promise<void>;
   /** 记录受邀者每一轮的用量(分享者的管理页按人、按模型展示)。只对 guest 调用。 */
   recordGuestUsage?(controller: string, usage: { kind: RemoteAgentKind; providerId: string | null; samples: GuestUsageSample[] }): void;
+  /** 记录同账号其他电脑每一轮的用量(远程与分享页按使用方展示)。只对 owner 调用。 */
+  recordOwnerUsage?(controller: string, usage: { kind: RemoteAgentKind; providerId: string | null; samples: GuestUsageSample[] }): void;
   /**
    * 「允许被远程调用」(供应商级授权，默认关)。不提供 = 不做供应商级限制(测试 / 旧接线)。
    *  - resolve：把对方要用的来源落到本机已开放的供应商上。providerId 是字符串时只核对它是否开放；
@@ -1035,7 +1037,7 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
       for await (const event of handle.events()) {
         if (run.closing) break;
         lastEventType = event.type;
-        if (run.trust === 'guest') meterGuestUsage(run, handle.model, event);
+        meterRunUsage(run, handle.model, event);
         if (run.acceptsGroupSwitch) {
           // 受邀者的任务按组分到了本机这一台：本机运行中失败时同样可以换一台(凭证排在错误前面)。
           const failure = relayRunFailureOf(event);
@@ -1081,14 +1083,16 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
     await finishRun(run, 'ended', 'navigation', false);
   }
 
-  function meterGuestUsage(run: Run, model: string | undefined, event: AgentEvent): void {
-    if (!deps.recordGuestUsage || event.type !== 'done') return;
+  function meterRunUsage(run: Run, model: string | undefined, event: AgentEvent): void {
+    const record = run.trust === 'guest' ? deps.recordGuestUsage : deps.recordOwnerUsage;
+    // 换了账号之后迟到的这一轮不记：用量账本按账号存放，记进去会落到新账号名下。
+    if (!record || event.type !== 'done' || !deps.isOwnerCurrent(run.owner)) return;
     run.usageMeter ??= createGuestUsageMeter(run.kind);
     try {
       const samples = run.usageMeter.observe(event, model ?? '');
-      if (samples.length > 0) deps.recordGuestUsage(run.controller, { kind: run.kind, providerId: run.providerId ?? null, samples });
+      if (samples.length > 0) record(run.controller, { kind: run.kind, providerId: run.providerId ?? null, samples });
     } catch (error) {
-      deps.log?.warn('remote agent guest usage record failed', { runId: run.id, error: String(error) });
+      deps.log?.warn('remote agent usage record failed', { runId: run.id, error: String(error) });
     }
   }
 
@@ -1278,7 +1282,7 @@ export function createRemoteAgentHost(deps: RemoteAgentHostDeps) {
       backend.client = new RemoteAgentRunClient(randomUUID(), connection.poller, {
         onEvent: (event) => {
           if (run.closing || run.relay !== backend) return;
-          meterGuestUsage(run, backend.model, event as AgentEvent);
+          meterRunUsage(run, backend.model, event as AgentEvent);
           const deliver = () => {
             if (!run.closing) append(run, { t: 'event', event });
           };

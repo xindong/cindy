@@ -402,6 +402,12 @@
       "title": "{{provider}} · Remote & Sharing",
       "shareTitle": "Sharing"
     },
+    "usage": {
+      "title": "Usage",
+      "description": "{{provider}} usage by who used it. This computer and your other computers are counted from this update on.",
+      "shareSource": "Shared with",
+      "unknownDevice": "Another computer"
+    },
     "section": {
       "title": "Provider Group",
       "addComputer": "Add Computer",
@@ -9439,7 +9445,10 @@
         "crossEngineWarning": "Switching engines rebuilds context and may lose content",
         "favoritesSyncFailed": "Favorites could not sync. Reopen the picker to retry; the remote computer may need an update.",
         "railRemoteProviderGroup": "{{provider}} · {{device}} · {{group}}",
-        "providerGroupLabel": "{{provider}} · {{group}}"
+        "providerGroupLabel": "{{provider}} · {{group}}",
+        "providerGroupRunningOn": "Running on {{device}}",
+        "providerGroupRunningHere": "Running on this computer",
+        "providerGroupUnassigned": "The Provider Group picks a computer when the task starts; usage then shows for that computer"
       }
     },
     "permissionSelector": {

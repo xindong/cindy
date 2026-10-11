@@ -22,12 +22,14 @@ import { getProviderGroupOwnerScope } from '../../provider-group/runtime.js';
 import { readProviderGroup } from '../../provider-group/store.js';
 import { remoteAgentPollerFor } from '../controller/service';
 import { getProviderShareUsageStore, installProviderShareUsageStore } from '../../device-link/providerShareUsageStore.js';
+import { currentProviderPartyUsageStore, flushProviderPartyUsage } from '../../usage/providerPartyUsageStore.js';
 import { readDeviceLinkSettings } from '../../device-link/settings-store.js';
 import { readTurnUsageResetAt } from '../../goal-host/usageLimit.js';
 import { getDesktopProviderService } from '../../maker-host/createDesktopProviderService.js';
 import { registerGuestProviderRoute } from '../../maker-host/guest-provider-route-store.js';
 import { isRemoteProviderInvocationAllowed } from '../../maker-host/remote-provider-access-store.js';
 import { guestProviderModelIds, resolveGuestProviderId, resolveSharedProviderId } from './providerAccess';
+import type { GuestUsageSample } from './guestUsage';
 import { createRemoteAgentHost, type HostedStartInput, type RemoteAgentHost } from './runHost';
 import { purgeClaudeHostedSessionArtifacts, purgeClaudeHostedTranscripts, purgePiHostedSubagentRuns } from './transcripts';
 
@@ -151,7 +153,10 @@ export function installRemoteAgentHost(options: { getMaker: () => Maker; userDat
     recordGuestUsage: (controller, sample) => {
       const peer = parseProviderSharePeer(controller);
       if (peer?.role === 'guest' && peer.memberId) usage.record(peer.shareId, peer.memberId, sample);
+      // 同账号的组所在电脑替它的受邀者转过来的任务：记在那台电脑名下(经那台使用)。
+      else if (!peer) recordDeviceUsage(controller, sample);
     },
+    recordOwnerUsage: (controller, sample) => recordDeviceUsage(controller, sample),
     // 供应商组(本机是组所在电脑)：受邀者的任务按组分给组内电脑，本机中转(provider-groups.md §4)。
     groupRelay: createProviderGroupGuestRelay({
       scope: getProviderGroupOwnerScope,
@@ -197,5 +202,17 @@ export function disposeRemoteAgentHost(): void {
 }
 
 function flushProviderShareUsage(): Promise<void> {
-  return getProviderShareUsageStore()?.flush() ?? Promise.resolve();
+  return Promise.all([getProviderShareUsageStore()?.flush(), flushProviderPartyUsage()]).then(() => undefined);
+}
+
+/** 同账号另一台电脑在本机运行的这一轮，记在「我的其他电脑」下(远程与分享页按使用方的用量)。 */
+function recordDeviceUsage(
+  controller: string,
+  sample: { kind: string; providerId: string | null; samples: GuestUsageSample[] },
+): void {
+  if (!sample.providerId) return;
+  currentProviderPartyUsageStore().record(
+    { kind: 'device', deviceId: controller },
+    { kind: sample.kind, providerId: sample.providerId, samples: sample.samples },
+  );
 }

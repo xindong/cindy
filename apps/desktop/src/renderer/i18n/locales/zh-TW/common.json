@@ -400,6 +400,12 @@
       "title": "{{provider}} · 遠端與分享",
       "shareTitle": "分享"
     },
+    "usage": {
+      "title": "用量",
+      "description": "依使用方統計 {{provider}} 的用量。本機與我的其他電腦從這次更新後開始記錄。",
+      "shareSource": "分享的人",
+      "unknownDevice": "另一台電腦"
+    },
     "section": {
       "title": "供應商組",
       "addComputer": "新增電腦",
@@ -9419,7 +9425,10 @@
         "crossEngineWarning": "切換引擎會重建上下文，可能遺失內容",
         "favoritesSyncFailed": "收藏未能同步。請重新開啟重試；被控電腦可能需要更新。",
         "railRemoteProviderGroup": "{{provider}} · {{device}} · {{group}}",
-        "providerGroupLabel": "{{provider}} · {{group}}"
+        "providerGroupLabel": "{{provider}} · {{group}}",
+        "providerGroupRunningOn": "目前在 {{device}} 上執行",
+        "providerGroupRunningHere": "目前在這台電腦上執行",
+        "providerGroupUnassigned": "開始後由供應商組選一台電腦，用量依那台顯示"
       },
       "modelListAria": "模型清單"
     },

@@ -36,6 +36,8 @@ import {
   writeProviderGroupBinding,
 } from '../provider-group/bindings.js';
 import { getProviderGroupGuestSwitch } from '../provider-group/guestSwitch.js';
+import { currentProviderPartyUsageStore } from '../usage/providerPartyUsageStore.js';
+import { recordSessionProviderPartyUsage } from './sessionProviderPartyUsage.js';
 import { createProviderGroupLeaseReporter, type ProviderGroupLeaseReporter } from '../provider-group/leaseReporter.js';
 import {
   getProviderGroupDirectory,
@@ -5438,6 +5440,21 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
     value: (...args: Parameters<NonNullable<SessionEventDependencies['onPluginTaskTerminal']>>) => {
       if (!ownerDb || getCurrentDbClientSnapshot() !== ownerDb) return;
       sessionEventDependencies.onPluginTaskTerminal?.(...args);
+    },
+  });
+  // 「远程与分享」页按使用方的用量：本机自己的任务记在当前账号的账本里，换了账号之后的迟到事件不记。
+  Object.defineProperty(ownerEventDependencies, 'recordProviderPartyUsage', {
+    value: (target: Session, event: AgentEvent) => {
+      if (!ownerDb || getCurrentDbClientSnapshot() !== ownerDb) return;
+      try {
+        recordSessionProviderPartyUsage({
+          providerOf: getSessionProvider,
+          bindingOf: readProviderGroupBinding,
+          record: (usage) => currentProviderPartyUsageStore().record({ kind: 'local' }, usage),
+        }, target, event);
+      } catch (error) {
+        log.warn('record provider party usage failed', { sessionId: target.id, error: String(error) });
+      }
     },
   });
   registration.disposers.push(session.onEvent(emitWiredSessionEvent));

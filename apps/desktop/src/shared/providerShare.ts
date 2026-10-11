@@ -62,6 +62,28 @@ export interface ProviderShareOwnedView {
   requests: ProviderShareRequestItem[];
 }
 
+/** 「远程与分享」页按使用方的用量里一个使用方(本机，或同账号的另一台电脑)。 */
+export interface ProviderPartyUsageView {
+  /** null = 本机。 */
+  deviceId: string | null;
+  /** 那台电脑的名字；读不到或本机时为 null。 */
+  deviceName: string | null;
+  lastUsedAt: number;
+  models: ProviderShareModelUsageView[];
+}
+
+/**
+ * 某个供应商按使用方的用量里，这台电脑自己能记到的部分(provider-groups.md §7)：本机自己的任务(含归本机
+ * 供应商组、在组里其他电脑上运行的)，与同账号其他电脑在本机运行的任务。分享的人在 owned 的成员里。
+ */
+export interface ProviderOwnUsageView {
+  providerId: string;
+  /** 本机自己的任务；没用过时为 null。 */
+  local: ProviderPartyUsageView | null;
+  /** 同账号的其他电脑，每台一项，最近用过的在前。 */
+  devices: ProviderPartyUsageView[];
+}
+
 export interface ProviderShareOwnerState {
   /** 分享服务可用(已登录、设备互联已连上本区域服务)。 */
   ready: boolean;
@@ -85,6 +107,8 @@ export interface ProviderShareSettledEvent {
 
 export type ProviderShareCommand =
   | { action: 'owned'; range: ProviderShareUsageRange }
+  /** 这个供应商按使用方的用量(本机与我的其他电脑)。不依赖分享服务。 */
+  | { action: 'own-usage'; providerId: string; range: ProviderShareUsageRange }
   | { action: 'create-link'; providerId: string }
   | { action: 'approve' | 'reject'; requestId: string }
   | { action: 'set-member'; memberId: string; status: 'pause' | 'resume' | 'remove' }
@@ -97,6 +121,7 @@ export type ProviderShareCommand =
 
 export interface ProviderShareCommandResult {
   owned: ProviderShareOwnerState;
+  'own-usage': ProviderOwnUsageView;
   'create-link': ProviderShareLinkCreated;
   approve: { ok: true };
   reject: { ok: true };

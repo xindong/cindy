@@ -400,6 +400,12 @@
       "title": "{{provider}} · リモートと共有",
       "shareTitle": "共有"
     },
+    "usage": {
+      "title": "使用量",
+      "description": "{{provider}} の使用量を利用者ごとに表示します。このパソコンとほかのパソコンの分は、今回のアップデートから記録します。",
+      "shareSource": "共有相手",
+      "unknownDevice": "別のパソコン"
+    },
     "section": {
       "title": "プロバイダーグループ",
       "addComputer": "パソコンを追加",
@@ -9420,7 +9426,10 @@
         "crossEngineWarning": "エンジンを切り替えるとコンテキストが再構築され、内容が失われる場合があります",
         "favoritesSyncFailed": "お気に入りを同期できません。選択画面を開き直してください。接続先の更新が必要な場合があります。",
         "railRemoteProviderGroup": "{{provider}} · {{device}} · {{group}}",
-        "providerGroupLabel": "{{provider}} · {{group}}"
+        "providerGroupLabel": "{{provider}} · {{group}}",
+        "providerGroupRunningOn": "現在 {{device}} で実行中",
+        "providerGroupRunningHere": "現在このパソコンで実行中",
+        "providerGroupUnassigned": "開始時にプロバイダーグループがパソコンを選び、使用量はそのパソコンの分を表示します"
       }
     },
     "permissionSelector": {

@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ProviderShareOwnerState } from '../../../../shared/providerShare';
+import type { ProviderOwnUsageView, ProviderShareOwnerState } from '../../../../shared/providerShare';
 import { ProviderShareManagePage } from '../ProviderShareManagePage';
 import { getProviderSharePendingRequests, resetProviderShareStoreForTests } from '../providerShareStore';
 
@@ -16,7 +16,10 @@ vi.mock('react-i18next', () => ({
 }));
 vi.mock('@/lib/toast', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 vi.mock('@/features/device-link/useDeviceLinkDeviceList', () => ({
-  useDeviceLinkDeviceList: () => [{ deviceId: 'self', name: "Magi's Mac Mini", isSelf: true }],
+  useDeviceLinkDeviceList: () => [
+    { deviceId: 'self', name: "Magi's Mac Mini", isSelf: true },
+    { deviceId: 'studio', name: 'Studio', isSelf: false },
+  ],
 }));
 const confirmSpy = vi.hoisted(() => vi.fn(async () => true));
 vi.mock('@/components/ui/confirm-dialog-provider', () => ({ useConfirmDialog: () => ({ confirm: confirmSpy }) }));
@@ -71,6 +74,26 @@ const owned = (): ProviderShareOwnerState => ({
   ],
 });
 
+const usageModel = (model: string, inputTokens: number, amount: number) => ({
+  kind: 'claude-code',
+  providerId: 'xd',
+  model,
+  turns: 3,
+  inputTokens,
+  outputTokens: 1_000,
+  cacheReadTokens: 0,
+  cacheCreateTokens: 0,
+  amount: { amount, currency: 'USD' as const },
+});
+
+const ownUsage = (): ProviderOwnUsageView => ({
+  providerId: 'xd',
+  local: { deviceId: null, deviceName: null, lastUsedAt: Date.now() - 120_000, models: [usageModel('claude-sonnet-5', 41_000, 2.5)] },
+  devices: [
+    { deviceId: 'studio', deviceName: 'Old Studio Name', lastUsedAt: Date.now() - 3_600_000, models: [usageModel('claude-fable-5-1', 9_000, 1.25)] },
+  ],
+});
+
 const command = vi.fn();
 
 beforeEach(() => {
@@ -79,6 +102,7 @@ beforeEach(() => {
   command.mockReset();
   command.mockImplementation(async (cmd: { action: string }) => {
     if (cmd.action === 'owned') return owned();
+    if (cmd.action === 'own-usage') return ownUsage();
     if (cmd.action === 'set-member' || cmd.action === 'approve' || cmd.action === 'reject') return { ok: true };
     throw new Error(`unexpected ${cmd.action}`);
   });
@@ -113,16 +137,42 @@ describe('ProviderShareManagePage', () => {
     expect(screen.getByText(/providerShare\.manage\.descriptionWithDevice/)).toBeTruthy();
   });
 
+  it('lists usage by party: this computer, my other computers and the people shared with', async () => {
+    renderPage();
+    const rows = await screen.findAllByTestId('provider-usage-row');
+    expect(rows.map((row) => row.getAttribute('data-usage-party'))).toEqual(['local', 'device:studio', 'member:mem-1']);
+    expect(command).toHaveBeenCalledWith({ action: 'own-usage', providerId: 'xd', range: 'month' });
+    // 本机写本机的电脑名；其他电脑用设备清单里现在的名字。
+    expect(rows[0]!.textContent).toContain("Magi's Mac Mini");
+    expect(rows[1]!.textContent).toContain('Studio');
+    expect(rows[1]!.textContent).not.toContain('Old Studio Name');
+    // 用量从已分享的人一行移到了「用量」块。
+    expect(screen.getByTestId('provider-share-member-row').textContent).not.toMatch(/members\.tokens/);
+  });
+
   it('re-reads usage when the period changes and expands the per-model breakdown', async () => {
     renderPage();
-    await screen.findAllByTestId('provider-share-member-row');
+    await screen.findAllByTestId('provider-usage-row');
     fireEvent.click(screen.getByRole('radio', { name: 'providerShare.manage.members.range.7d' }));
     await waitFor(() => expect(command).toHaveBeenCalledWith({ action: 'owned', range: '7d' }));
+    expect(command).toHaveBeenCalledWith({ action: 'own-usage', providerId: 'xd', range: '7d' });
 
-    fireEvent.click(screen.getByRole('button', { name: /providerShare\.manage\.members\.expandAria/ }));
+    fireEvent.click(screen.getByRole('button', { name: /providerShare\.manage\.members\.expandAria.*Lizi/ }));
     expect(screen.getByText('Opus 5.5')).toBeTruthy();
     expect(screen.getByText('$31.20')).toBeTruthy();
     expect(screen.getByText('providerShare.manage.members.estimateNote')).toBeTruthy();
+  });
+
+  it('does not show zero for this computer when its usage could not be read', async () => {
+    command.mockImplementation(async (cmd: { action: string }) => {
+      if (cmd.action === 'owned') return owned();
+      throw new Error('boom');
+    });
+    renderPage();
+    const rows = await screen.findAllByTestId('provider-usage-row');
+    expect(rows[0]!.getAttribute('data-usage-party')).toBe('local');
+    expect(rows[0]!.textContent).toContain('providerShare.manage.loadFailed');
+    expect(rows[0]!.textContent).not.toMatch(/members\.tokens/);
   });
 
   it('pauses and removes a member after confirmation', async () => {

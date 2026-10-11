@@ -36,6 +36,33 @@ export interface ProviderUsageScope {
   deviceId: string | null;
 }
 
+/**
+ * 供应商组那一项的用量读谁(provider-groups.md §10「模型列表」)：组那一项代表组里的几台电脑，
+ * 不拿组所在电脑自己的账号当整个组的用量。
+ */
+export type ProviderGroupUsage =
+  /** 任务还没经这个组分到电脑(新任务、还没运行过、用的不是这个组)：不显示某一台的配额。 */
+  | { kind: 'unassigned' }
+  /**
+   * 任务正经这个组在这台电脑上运行：读那台的账号，与输入框下方的用量同一份。
+   * usage 为 null = 读不到那台的账号(别人分享的电脑、那台的目录还没读到)。
+   */
+  | {
+      kind: 'running';
+      /** 那台电脑的名字;null = 就是这台电脑。 */
+      deviceName: string | null;
+      usage: { provider: ProviderView; scope: ProviderUsageScope } | null;
+    };
+
+/**
+ * 某个目录里的某个供应商是不是供应商组、用量读谁；不是组返回 null。
+ * directoryDeviceId:目录所在的电脑,null = 任务所在电脑的目录。
+ */
+export type ProviderGroupUsageOf = (
+  directoryDeviceId: string | null,
+  providerId: string,
+) => ProviderGroupUsage | null;
+
 type CodexBucket = MobileCodexRateLimitsResult['rateLimits'];
 
 /** Codex account usage in one shape, whether it came from local app-server reads or a device. */

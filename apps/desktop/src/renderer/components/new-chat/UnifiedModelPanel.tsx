@@ -43,7 +43,7 @@ import {
   withMenuLabels,
 } from '@/components/ui/menu-row';
 import { ModelSourceUsageProvider } from './ModelSourceDetails';
-import type { ProviderUsageScope } from './useProviderWeeklyQuota';
+import type { ProviderGroupUsageOf, ProviderUsageScope } from './useProviderWeeklyQuota';
 import {
   anchorKey,
   favoriteMatchesSelection,
@@ -143,6 +143,11 @@ export interface UnifiedModelPanelProps {
   interactionDisabled?: boolean;
   /** Whose subscription accounts the directory may show: this desktop or its linked device. */
   providerUsage?: ProviderUsageScope | null;
+  /**
+   * 供应商组那一项的用量读谁(provider-groups.md §10):任务正经组在某台运行时读那台,还没分到电脑时
+   * 不显示某一台的配额。缺省 = 都按目录归属读。
+   */
+  providerGroupUsage?: ProviderGroupUsageOf;
   /** 保留付费模型为锁定展示行，并把点击交给统一付费提示。 */
   includePaymentRequired?: boolean;
   paymentRequiredLabel?: string;
@@ -329,6 +334,7 @@ export function UnifiedModelPanel({
   listMaxHeight,
   interactionDisabled = false,
   providerUsage = null,
+  providerGroupUsage,
   includePaymentRequired = false,
   paymentRequiredLabel,
   paymentRequiredUnlockLabel,
@@ -1058,6 +1064,7 @@ export function UnifiedModelPanel({
     >
       <UnifiedModelRail
         providerUsage={providerUsage}
+        {...(providerGroupUsage ? { providerGroupUsage } : {})}
         items={railItems}
         active={effectiveRail}
         onSelect={handleRailSelect}
@@ -1372,7 +1379,16 @@ export function UnifiedModelPanel({
     </div>
   );
   return (
-    <ModelSourceUsageProvider providers={providers} scope={providerUsage}>
+    <ModelSourceUsageProvider
+      providers={providers}
+      scope={providerUsage}
+      {...(providerGroupUsage
+        ? {
+            groupUsageOf: (providerId: string) =>
+              providerGroupUsage(remoteSources?.active?.deviceId ?? null, providerId),
+          }
+        : {})}
+    >
       {panelContent}
     </ModelSourceUsageProvider>
   );
