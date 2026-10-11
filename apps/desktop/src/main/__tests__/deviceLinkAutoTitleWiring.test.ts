@@ -196,24 +196,19 @@ describe('device-link auto-title wiring', () => {
 });
 
 describe('user rename notification ordering', () => {
-  it('三条改名出口都在写库**之前**记号', () => {
-    // 写库是一次 worker RPC 往返:改名提交与拿到回执之间有真实时间差,期间并发的
-    // 智能标题仍能满足 `WHERE title = 期望值` 把用户刚保存的名字盖掉(review P1)。
+  it('本机与远程改名出口都在写库时标记 user 来源', () => {
+    // 自动标题通过 title_source 的条件写保护用户改名;两个 main 侧入口必须把来源写入
+    // 同一份 patch,而不是再依赖进程内通知。MCP 批量改名的 worker 事务在 tx.test 中覆盖。
     for (const [note, write] of [
       // local-db:sessions:update(本机重命名框)
       [
-        "if (typeof p.title === 'string') noteUserTitleWritten(sid);",
+        "if (typeof p.title === 'string') setObj.titleSource = 'user';",
         'await withStatusWriteLock(',
       ],
       // patchSessionMetaInDb(device-link 远程改名)
       [
-        'if (patch.title !== undefined) noteUserTitleWritten(sessionId);',
+        "if (patch.title !== undefined) setObj.titleSource = 'user';",
         'withStatusWriteLock(db, sessionId, patch.status, async () => {',
-      ],
-      // renameSessionTitlesInDb(MCP 批量改名)
-      [
-        'for (const change of changes) noteUserTitleWritten(change.sessionId);',
-        "getDbClient()\n    .tx('sessions.renameTitles'",
       ],
     ] as const) {
       const noteAt = sessionsSource.indexOf(note);

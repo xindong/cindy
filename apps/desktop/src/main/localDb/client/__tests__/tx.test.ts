@@ -66,6 +66,7 @@ CREATE TABLE project_aliases (
 CREATE TABLE sessions (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL DEFAULT 'New Maker',
+  title_source TEXT,
   working_dir TEXT,
   model TEXT NOT NULL DEFAULT 'claude-sonnet-4-6',
   provider_id TEXT,
@@ -1714,7 +1715,9 @@ describe('db worker tx handlers', () => {
     },
   );
 
-  it('sessions.renameTitles applies title changes atomically with preconditions', async () => {
+  it.each([false, true])(
+    'sessions.renameTitles applies title changes atomically with preconditions (inline=%s)',
+    async (useInlineWorker) => {
     await withClient(async (client) => {
       await seedSession(client, 's1', {
         title: 'Old title',
@@ -1743,9 +1746,10 @@ describe('db worker tx handlers', () => {
         },
       ]);
       await expect(
-        client.queryOne('SELECT title FROM sessions WHERE id = ?', ['s1']),
+        client.queryOne('SELECT title, title_source FROM sessions WHERE id = ?', ['s1']),
       ).resolves.toEqual({
         title: 'New title',
+        title_source: 'user',
       });
 
       await expect(
@@ -1760,11 +1764,12 @@ describe('db worker tx handlers', () => {
         }),
       ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
       await expect(
-        client.queryOne('SELECT title FROM sessions WHERE id = ?', ['s1']),
+        client.queryOne('SELECT title, title_source FROM sessions WHERE id = ?', ['s1']),
       ).resolves.toEqual({
         title: 'New title',
+        title_source: 'user',
       });
-    });
+    }, { useInlineWorker });
   });
 
   it.each([false, true])(
