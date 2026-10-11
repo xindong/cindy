@@ -49,6 +49,33 @@ const projectForCurrentController = (result: unknown) =>
     modelVisibilityOverrides?: Record<string, boolean>;
   };
 
+describe('schedule binding list projection', () => {
+  const fields = {
+    id: 'heartbeat', name: 'Heartbeat', status: 'paused', targetSessionId: 'task',
+    cronExpr: '*/5 * * * *', manual: false, recurring: true, intervalMs: 600_000,
+  };
+  it('removes execution payload before tunnel serialization, preserving every current binding', () => {
+    const full = [
+      { ...fields, prompt: 'x'.repeat(5 * 1024 * 1024), script: { code: 'private' } },
+      { ...fields, id: 'second', recurring: false },
+      { ...fields, id: 'expired', status: 'expired' },
+      { ...fields, id: 'unbound', targetSessionId: undefined },
+    ];
+    const projected = __testing.projectInvokeResultForTunnel(
+      'maker:schedule:list', full, false, [null, { sessionBindings: true }],
+    );
+    expect(projected).toEqual([fields, { ...fields, id: 'second', recurring: false }]);
+    expect(Buffer.byteLength(JSON.stringify(full))).toBeGreaterThan(4 * 1024 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(projected))).toBeLessThan(1024);
+  });
+  it('keeps existing local/mobile/old-controller list responses intact without explicit opt-in', () => {
+    const full = [{ ...fields, prompt: 'execution config' }];
+    for (const args of [[], [null], [null, { sessionBindings: false }]]) {
+      expect(__testing.projectInvokeResultForTunnel('maker:schedule:list', full, false, args)).toBe(full);
+    }
+  });
+});
+
 describe('controller capability metadata', () => {
   it('distinguishes an absent subscribe field from an explicit empty capability set', () => {
     expect(__testing.optionalControllerCapabilities({})).toBeUndefined();

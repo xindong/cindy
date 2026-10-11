@@ -214,7 +214,7 @@ export const SessionCard = withSidebarNavigation<SessionCardProps>(function Sess
   );
   const remoteWritesBlocked = isRemoteSessionWriteBlocked(session);
   const isAutomationGenerated = isAutomationGeneratedSession(session);
-  const boundSchedules = useSessionBoundSchedules(session.id);
+  const boundSchedules = useSessionBoundSchedules(session.id, session.deviceLinkDeviceId);
   const showScheduleBindingBadge = boundSchedules.length > 0;
   const showAutomationTimer = !showScheduleBindingBadge && isAutomationGenerated;
   const displayTitle = getSessionDisplayTitle(
@@ -560,8 +560,7 @@ export const SessionCard = withSidebarNavigation<SessionCardProps>(function Sess
     !isEmpty &&
     !session.remoteHostId &&
     !session.deviceLinkDeviceId &&
-    // Agent 在另一台电脑运行：它的会话记录按项目路径存在那台，移动后无法继续。
-    !session.agentDeviceId &&
+    // Agent 在另一台电脑运行的任务也可移动：那台按任务 id 定址 Agent 工作区，与本机路径无关。
     session.status !== 'archived';
 
   const moveToProjectSubmenu = canMoveToProject ? (
@@ -594,6 +593,7 @@ export const SessionCard = withSidebarNavigation<SessionCardProps>(function Sess
     showScheduleBindingBadge ? (
       <ScheduleBindingBadge
         schedules={boundSchedules}
+        deviceLinkDeviceId={session.deviceLinkDeviceId}
         size={iconSize}
         activeForeground={isActive}
       />

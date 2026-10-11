@@ -62,6 +62,13 @@ import {
 } from '@/components/new-chat/AddRemoteProjectDialog';
 import { useHasAnyRemoteTarget } from '@/hooks/useHasAnyReadyRemoteHost';
 import { useSelectableDevices } from '@/hooks/useControllableDevices';
+import { useProviderShareAgentDevices } from '@/features/provider-share/useProviderShareAgentDevices';
+import { isProviderShareAgentDeviceId } from '../../../shared/providerShare';
+import { isSharedTaskPeer } from '@cindy/device-link';
+import {
+  controlledComputerSupportsRemoteAgent,
+  selectControlledTaskAgentDevices,
+} from '@/lib/controlledTaskAgentLocation';
 import { useProviderOnboarding } from '@/hooks/useProviderOnboarding';
 import { HomeZeroModelAction } from './HomeZeroModelAction';
 import { resolveDeviceLinkSubmission } from './deviceLinkCreateArgs';
@@ -193,9 +200,6 @@ import {
 import { filterGhostsForWorkdir } from '@/cindy-brain/ghostWorkdirFilter';
 import type { Effort, PermissionMode } from '@/lib/userPreferences.types';
 import {
-  categorizeByFilename,
-  categorizeFile,
-  extractExt,
   type AttachedFile,
   type MentionedResource,
 } from '@/lib/fileTypes';
@@ -286,6 +290,7 @@ import {
 import { recallAgentDeviceSelection, rememberAgentDeviceSelection } from './agentDeviceDraftMemory';
 import { makeMirrorAccessors, replaceScope, clearScope } from '@/state/deviceLinkModelMirror';
 import type { ModelMemoryAccessors } from '@/components/new-chat/ModelSelector';
+import { remoteAgentProviders } from '@/components/new-chat/unifiedModelSelection';
 import { resolveNewMakerDraftRightSidebar } from './newMakerDraftRightSidebar';
 import { resolveNewMakerDraftEffort } from './newMakerDraftModelPrefs';
 import { loadSshSessionModelSelection, SshModelSelectionError } from './sshSessionModelSelection';
@@ -427,6 +432,8 @@ function draftEnableOrcaOptions(
   providers: ProviderView[],
   providersReady: boolean,
   deferDelegateTask = false,
+  /** `providers` 是哪一处的目录(Agent 所在位置)；null = 任务所在电脑。 */
+  providersAgentDeviceId: string | null = null,
 ) {
   const preferredAgent: 'claude-code' | 'codex' | 'pi' =
     collab.worker === 'codex' ? 'codex' : collab.worker === 'pi' ? 'pi' : 'claude-code';
@@ -448,6 +455,45 @@ function draftEnableOrcaOptions(
   })();
   const cfg = collab.workerConfig;
   if (!cfg) return { workerAgent };
+  // 这次在弹窗里按某个位置(远程供应商或任务所在电脑)的目录选的 Worker：位置与手上这份目录不是同一处时，
+  // 模型与来源已在选择时按那里的目录收窄过，带着位置原样提交，不拿这份目录收窄或换 agent。是同一处时
+  // 照常按 live 目录收窄(发送前来源可能已断开)，并带上位置。跨重启恢复的配置不带位置
+  // (见 CollabWorkerConfig.agentDeviceId)，同样走下面的收窄。
+  const workerLocation = cfg.agentDeviceId !== undefined && !cfg.executionDeviceId
+    ? { agentDeviceId: cfg.agentDeviceId }
+    : {};
+  if (workerLocation.agentDeviceId !== undefined && workerLocation.agentDeviceId !== providersAgentDeviceId) {
+    return {
+      workerAgent: preferredAgent,
+      role: cfg.role,
+      label: createWorkerLabel(cfg.role, []),
+      model: cfg.model,
+      effort: cfg.effort as 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined,
+      fast: cfg.fast,
+      providerId: cfg.providerId ?? undefined,
+      delegateTask: cfg.initialTask,
+      ...(deferDelegateTask ? { deferDelegateTask: true } : {}),
+      workerPermissionMode: cfg.workerPermissionMode,
+      ...workerLocation,
+    };
+  }
+  // 放到另一台电脑的 Worker：模型与来源是按那台的目录选的，不能拿本机目录收窄或换 agent。
+  if (cfg.executionDeviceId) {
+    return {
+      workerAgent: preferredAgent,
+      role: cfg.role,
+      label: createWorkerLabel(cfg.role, []),
+      model: cfg.model,
+      effort: cfg.effort as 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined,
+      fast: cfg.fast,
+      providerId: cfg.providerId ?? undefined,
+      delegateTask: cfg.initialTask,
+      ...(deferDelegateTask ? { deferDelegateTask: true } : {}),
+      workerPermissionMode: cfg.workerPermissionMode,
+      executionDeviceId: cfg.executionDeviceId,
+      ...(cfg.executionWorkingDir ? { workingDir: cfg.executionWorkingDir } : {}),
+    };
+  }
   // 首选 agent 被目标设备目录换掉时,配置里的 model / providerId 属于旧 agent,一并丢弃 ——
   // 留着只会撞 INVALID_PARAMS。让被控端按新 agent 的默认值起 Worker。
   if (workerAgent !== preferredAgent) {
@@ -458,6 +504,7 @@ function draftEnableOrcaOptions(
       delegateTask: cfg.initialTask,
       ...(deferDelegateTask ? { deferDelegateTask: true } : {}),
       workerPermissionMode: cfg.workerPermissionMode,
+      ...workerLocation,
     };
   }
   // 草稿里持久化的来源在发送时按 live 目录重新收窄(已连接 + 提供该模型 + 未被可见性
@@ -495,6 +542,7 @@ function draftEnableOrcaOptions(
     delegateTask: cfg.initialTask,
     ...(deferDelegateTask ? { deferDelegateTask: true } : {}),
     workerPermissionMode: cfg.workerPermissionMode,
+    ...workerLocation,
   };
 }
 
@@ -877,26 +925,6 @@ export function NewMakerDraftRoute() {
       text: stripLocalMentionChips(composerDraft.text),
     });
   }, []);
-  /**
-   * 丢掉路径型(非图片)附件 —— 触发条件是**文件系统变了**,即换设备。
-   *
-   * 与 chip 相反,附件存的是**绝对**路径(useAttachments 落 `raw.path`)。所以同一台机器上换项目
-   * 它们仍然有效,不该丢;只有跨设备(远程→远程、远程→本机,方向无关)那条绝对路径才会失效 ——
-   * attachment-path-passthrough 之后非图片附件只把 path 透传给模型(agent 自己用 Read 读),
-   * 而 rehomeDraftAttachments 只重整图片、非图片原样返回,于是要么读不到,要么读到同路径下一个
-   * 毫不相关的文件(后者更糟,用户不会发现)。图片走 xdt-image:// 缓存、不依赖对端文件系统,不受影响。
-   *
-   * 这两件事原先合在一个 cleanupCrossFilesystemDraftContext 里、由同一个条件驱动,于是必然有一边
-   * 是错的:按设备触发就漏掉同机换项目的 chip(上面那条 P1),按项目触发又会在同机换项目时误丢
-   * 用户的附件。拆开之后各自绑住自己真正的解析基准。
-   */
-  const dropPathBackedAttachments = useCallback(() => {
-    const stranded = attachmentState.attachments.filter((f) => f.category !== 'image');
-    if (stranded.length === 0) return;
-    for (const f of stranded) attachmentState.removeFile(f.id);
-    // 只有附件给 toast:chip 是可见的文字、重打一次就有,附件从托盘里无声消失只会被当成 bug。
-    toast.info(t('newChat.deviceSwitcher.attachmentsDropped', { count: stranded.length }));
-  }, [attachmentState, t]);
   const effectiveWorkingDir = draft.workingDir;
   const effectiveRemoteHostId = draft.remoteHostId;
   const isRemoteProjectDraft = effectiveWorkingDir != null && effectiveRemoteHostId != null;
@@ -906,32 +934,68 @@ export function NewMakerDraftRoute() {
   const effectiveDeviceLinkDeviceId = draft.deviceLinkDeviceId ?? undefined;
   const effectiveDeviceLinkDeviceName = draft.deviceLinkDeviceName;
   /**
-   * 「Agent 在另一台电脑运行」:任务、项目文件与命令留在本机,Agent 用那台的登录、供应商与网络。
-   * 只对本机任务成立(与 device-link / SSH 目标互斥,store 已保证)。
+   * 远程控制下新建任务(建到被控电脑上)时,Agent 同样可以在第三台电脑运行(与手机新建任务、
+   * 远程控制的已建任务同一套):被控电脑的供应商目录带「允许被远程调用」标记才提供(它认得
+   * create-session 的 agentDeviceId)。共享任务访客读到的是自己账号的设备,与这台电脑无关。
+   */
+  const { providers: deviceLinkHostProviders } = useDeviceProviders(effectiveDeviceLinkDeviceId);
+  // 已经选好的另一台电脑一定是在这台被控电脑确认支持时选的(换被控电脑 store 即清空):被控电脑的
+  // 目录暂时读不到(首次加载 / 重连)时继续生效,不让草稿在两份目录之间来回重种。
+  const deviceLinkRemoteAgentSupported =
+    !!effectiveDeviceLinkDeviceId &&
+    !isSharedTaskPeer(effectiveDeviceLinkDeviceId) &&
+    (controlledComputerSupportsRemoteAgent(deviceLinkHostProviders) ||
+      (draft.agentDeviceId != null && deviceLinkHostProviders.length === 0));
+  /**
+   * 「Agent 在另一台电脑运行」:任务、项目文件与命令留在任务所在电脑(本机,或上面那种被控电脑),
+   * Agent 用那台的登录、供应商与网络。SSH 任务不成立(store 已保证)。
    */
   const effectiveAgentDeviceId =
-    !effectiveDeviceLinkDeviceId && !effectiveRemoteHostId ? (draft.agentDeviceId ?? undefined) : undefined;
+    !effectiveRemoteHostId && (!effectiveDeviceLinkDeviceId || deviceLinkRemoteAgentSupported)
+      ? (draft.agentDeviceId ?? undefined)
+      : undefined;
   const isAgentDeviceDraft = effectiveAgentDeviceId != null;
   /**
    * 远程 Agent 的可选落点:在线的同账号电脑,在模型选择器左侧栏里按供应商列出(选中那里的
    * 模型 = Agent 在那台运行)。只有已允许远程调用的供应商会投影出来;没有可用供应商的
    * 设备不会占模型列表的位置。当前落点即使掉线也保留,让用户看得到、换得回来。
    */
-  const remoteAgentDevices = useMemo(
-    () =>
-      selectableDevices
+  // 供应商分享：别人分享给我的供应商(`share:<id>`)同样是落点，只并进模型选择器，不进设备切换器。
+  const { devices: providerShareDevices } =
+    useProviderShareAgentDevices([effectiveAgentDeviceId]);
+  const remoteAgentDevices = useMemo(() => {
+    if (effectiveDeviceLinkDeviceId) {
+      // 建到被控电脑的任务:候选去掉被控电脑本身;本机收到的分享被控电脑用不了,不并入。
+      // 被控电脑不支持时不传,模型面板维持只列被控电脑的目录。
+      return deviceLinkRemoteAgentSupported
+        ? selectControlledTaskAgentDevices({
+            devices: selectableDevices,
+            controlledDeviceId: effectiveDeviceLinkDeviceId,
+            keepDeviceIds: [effectiveAgentDeviceId],
+          })
+        : undefined;
+    }
+    return [
+      ...selectableDevices
         .filter(
           (device) =>
             device.online || device.deviceId === effectiveAgentDeviceId,
         )
         .map(({ deviceId, name }) => ({ deviceId, name })),
-    [selectableDevices, effectiveAgentDeviceId],
-  );
+      ...providerShareDevices,
+    ];
+  }, [
+    selectableDevices,
+    providerShareDevices,
+    effectiveDeviceLinkDeviceId,
+    deviceLinkRemoteAgentSupported,
+    effectiveAgentDeviceId,
+  ]);
   /**
-   * 模型目录所在的电脑:任务建到远程设备时是那台;Agent 在另一台电脑运行时也是那台(模型、
-   * Agent 登录与可用引擎都以运行 Agent 的电脑为准)。本机任务为 undefined。
+   * 模型目录所在的电脑:Agent 在另一台电脑运行时是那台(模型、Agent 登录与可用引擎都以运行
+   * Agent 的电脑为准);否则任务建到远程设备时是那台。本机任务为 undefined。
    */
-  const catalogDeviceId = effectiveDeviceLinkDeviceId ?? effectiveAgentDeviceId;
+  const catalogDeviceId = effectiveAgentDeviceId ?? effectiveDeviceLinkDeviceId;
   /** 草稿的模型选择以 catalogDeviceId 那台的目录为准(dlSel),不读写本机草稿记忆。 */
   const usesDeviceCatalog = catalogDeviceId != null;
   // 入口门控:只在 runtime 已注册的 agent 上开放创建入口(Pi 二进制缺失时 buildPiAgent 返回
@@ -1038,85 +1102,6 @@ export function NewMakerDraftRoute() {
     wtBranchPreferenceErrorRef.current = false;
     setWtBranchPreferenceError(false);
   }, []);
-  /**
-   * 远程草稿的附件闸门:**先选设备、之后再拖进来的**路径型附件同样进不了对端(Codex review P1)。
-   *
-   * 换设备时的 cleanupCrossFilesystemDraftContext 只能清掉「切换那一刻已经在托盘里」的,管不到
-   * 之后新加的;而 rehomeDraftAttachments 只重整图片、非图片原样返回,于是那条**控制端**绝对路径
-   * 会随首条消息发到对端 —— 要么读不到,要么读到同路径下一个毫不相关的文件。两者一起才构成
-   * 「远程草稿绝不携带控制端路径附件」这条不变量,少一半就等于留着一条口子。
-   *
-   * 为什么是拒绝而不是「传上去」:把文件送到对端需要一个能在对端写字节的通道,而 device-link
-   * 的 invoke allowlist 里没有、也不该为此加一个写通道 —— 那是权限边界变更,不属于本 PR。
-   * 所以在用户动作发生的那一刻就明确拒绝并说明,而不是等发送时静默丢掉(那才像 bug)。
-   * 图片不受影响:它们走 xdt-image:// 缓存,由 rehomeDraftAttachments 正常搬运。
-   *
-   * 包一层而不是改 useAttachments:这条限制只属于「创建页 + 远程草稿」这个语境,
-   * 会话中途与本机草稿都不该被它影响。ChatInput 与本路由自己的拖拽 / 粘贴入口共用这一份,
-   * 免得又出现「只堵了一半」。
-   */
-  const guardedAttachmentState = useMemo(() => {
-    if (!isDeviceLinkDraft) return attachmentState;
-    return {
-      ...attachmentState,
-      addFiles: async (fileList: FileList | readonly File[]) => {
-        const incoming = Array.from(fileList);
-        // 判据必须与下游**同口径**(Codex review 第 29 轮 P1)。原来这里用 `f.type.startsWith('image/')`,
-        // 而 useAttachments 的分类**完全不看 MIME** —— 它先 extractExt(name) → categorizeFile,
-        // 扩展名认不出来才 peekFileHeader 按魔数推断。于是 Electron 给空 / 通用 `File.type` 时
-        // (某些平台与拖拽源就是如此,重命名过的图片更是必然),一张 useAttachments 明明能正确识别的
-        // 图片会被这道闸门拦掉,而且**只在远程草稿下**如此:用户切回本机就能加,现象极难理解。
-        //
-        // 所以改成「只拒绝**明确**是非图片的」:
-        //   · 分类为 image → 放行;
-        //   · 扩展名 / 文件名认不出类别(category 为 null)→ 也放行 —— 交给 useAttachments 的文件头
-        //     推断,推断出非图片会被下方的收敛式不变量 effect 移除并 toast;
-        //   · 分类为明确的非图片(pdf / text / …)→ 就地拒绝并说明。
-        //
-        // 这也让两道防线的分工彻底清楚:闸门是 **best-effort 的即时反馈**(用户动作那一刻就知道为什么),
-        // 收敛器才是**权威不变量**(不论从哪条路进来,远程草稿里绝不留下路径型附件)。闸门宁可放过、
-        // 绝不误拒;真正的兜底不靠它。
-        const definitelyNonImage = (f: File): boolean => {
-          const ext = extractExt(f.name);
-          const category = ext ? categorizeFile(ext) : categorizeByFilename(f.name);
-          if (!category) return false; // 未知 → 不在这里下结论
-          return category !== 'image';
-        };
-        const rejected = incoming.filter(definitelyNonImage);
-        const passed = incoming.filter((f) => !definitelyNonImage(f));
-        if (rejected.length > 0) {
-          toast.warning(
-            t('newChat.deviceSwitcher.attachmentsRemoteUnsupported', { count: rejected.length }),
-          );
-        }
-        if (passed.length > 0) await attachmentState.addFiles(passed);
-      },
-    };
-  }, [isDeviceLinkDraft, attachmentState, t]);
-  /**
-   * 「远程草稿绝不携带控制端路径附件」的**收敛器** —— 兜住所有按路径逐个堵会漏掉的入口。
-   *
-   * 为什么单靠上面那个 addFiles 闸门不够(Codex review P1):`useAttachments.addFiles` 对未知扩展名
-   * 的文件要先 await `peekFileHeader` 猜类型,附件是在那次 IPC 回来之后才进 state 的。于是存在这条
-   * 时序 —— 本机草稿下拖入一个未知扩展名文件 → 在 IPC 往返期间切到远程设备 → 切换时的清理找不到它
-   * (还没进 state)→ IPC 回来后它被追加进去,而那次调用握的是**切换前**取到的真 addFiles,绕过了
-   * 闸门。下一次发送就把控制端绝对路径发给对端。
-   *
-   * 这个 hook 在本 PR 的 review 里已经按「入口」被抓漏三次(切换时清理 → 加时闸门 → 这条在途摄入),
-   * 所以这次不再补第四个入口,改成维护**不变量**:只要远程草稿里出现了非图片附件,不论它从哪条路
-   * 进来的,都移除并说明。之后任何新入口都自动被覆盖。
-   *
-   * 与另两处的关系(别当成重复删掉任何一个):闸门让用户在动作发生那一刻就得到明确拒绝、文件根本
-   * 不进 state;切换时的同步清理让附件在下一帧之前就消失、且顺带处理 mention chip;这条是最后一道
-   * 网,只在前两者都没拦住时才动。
-   */
-  useEffect(() => {
-    if (!isDeviceLinkDraft) return;
-    const stranded = attachmentState.attachments.filter((f) => f.category !== 'image');
-    if (stranded.length === 0) return;
-    for (const f of stranded) attachmentState.removeFile(f.id);
-    toast.info(t('newChat.deviceSwitcher.attachmentsDropped', { count: stranded.length }));
-  }, [isDeviceLinkDraft, attachmentState.attachments, attachmentState.removeFile, t]);
   // 零可用模型引导卡:device-link 草稿不出(连接态在被控端,本机替它连不上)。
   const providerOnboarding = useProviderOnboarding();
   const showProviderOnboardingCard = providerOnboarding.visible && !isDeviceLinkDraft;
@@ -1314,6 +1299,15 @@ export function NewMakerDraftRoute() {
     unsupported: deviceProvidersUnsupported,
   } = useDeviceProviders(catalogDeviceId);
   const providers = catalogDeviceId ? deviceProviders : localProviders;
+  /**
+   * 远程 Agent 只能用运行 Agent 那台电脑开放了「允许被远程调用」的供应商(那台是最终裁决方,
+   * 显式指定未开放的来源会被拒):Agent 在另一台电脑运行时,默认来源解析、提交给被控电脑的来源
+   * 与协同 Worker 收窄都只看这些。其余情况就是目录本身。
+   */
+  const agentCatalogProviders = useMemo(
+    () => (effectiveAgentDeviceId ? remoteAgentProviders(deviceProviders) : deviceProviders),
+    [effectiveAgentDeviceId, deviceProviders],
+  );
   // 新旧用户统一使用 A。老被控端只有 capabilities、没有供应商目录时，
   // 保留兼容列表与引擎下拉；否则联合列表会为空，也无法切换引擎。
   const unifiedModelPanelEnabled = !catalogDeviceId || !deviceProvidersUnsupported;
@@ -1561,24 +1555,30 @@ export function NewMakerDraftRoute() {
     remoteDraftRetryEpoch,
   ]);
 
-  // 运行 Agent 的电脑只提供模型目录：任务在本机，没有远程草稿默认值，改用本次运行内对这台
-  // 电脑的上一次选择 + 本机为这台电脑记的每模型档位(见 agentDeviceDraftMemory)。
+  // 运行 Agent 的电脑只提供模型目录：没有它的草稿默认值，改用本次运行内对这台电脑的上一次
+  // 选择 + 本机为这台电脑记的每模型档位(见 agentDeviceDraftMemory)。任务建到被控电脑时，权限
+  // 在被控电脑上生效：等被控电脑的草稿值到了，沿用其中的权限档。
   const agentDeviceModelMemoryVersion = useAgentDeviceModelMemoryVersion();
-  const deviceDraftDefaultsReady = isAgentDeviceDraft || remoteDraftState.status === 'ready';
-  const deviceDraftDefaults = useMemo<RemoteDraftDefaults | null>(
-    () =>
-      isAgentDeviceDraft && effectiveAgentDeviceId
-        ? recallAgentDeviceSelection(effectiveAgentDeviceId, capabilityAgentKind)
-        : remoteDraftState.value,
+  const deviceDraftDefaultsReady =
+    (isAgentDeviceDraft && !isDeviceLinkDraft) || remoteDraftState.status === 'ready';
+  const deviceDraftDefaults = useMemo<RemoteDraftDefaults | null>(() => {
+    if (!isAgentDeviceDraft || !effectiveAgentDeviceId) return remoteDraftState.value;
+    const recalled = recallAgentDeviceSelection(effectiveAgentDeviceId, capabilityAgentKind);
+    const taskComputerPermission = isDeviceLinkDraft
+      ? remoteDraftState.value?.permissionMode
+      : undefined;
+    return taskComputerPermission
+      ? { ...recalled, permissionMode: taskComputerPermission }
+      : recalled;
     // agentDeviceModelMemoryVersion:档位记忆变了要重新取回,切模型时才按最新档位还原。
-    [
-      isAgentDeviceDraft,
-      effectiveAgentDeviceId,
-      capabilityAgentKind,
-      remoteDraftState.value,
-      agentDeviceModelMemoryVersion,
-    ],
-  );
+  }, [
+    isAgentDeviceDraft,
+    isDeviceLinkDraft,
+    effectiveAgentDeviceId,
+    capabilityAgentKind,
+    remoteDraftState.value,
+    agentDeviceModelMemoryVersion,
+  ]);
 
   // seed dlSel:等被控端 capabilities + 草稿值都就绪后播种。切设备 / vendor 必须重种；同一目标
   // 在被控端明确未选过模型且控制端未编辑时，允许 capabilities 刷新重新校准区域默认。
@@ -1705,7 +1705,8 @@ export function NewMakerDraftRoute() {
       setRemoteDraftState({ status: 'ready', value: next });
       // 选中行(dlSel)的 effort/fast 也跟被控端走:按当前 dlSel.model 重解析,但保留控制端的
       // permission/source/model 选择(非按模型记 / 控制端 launch 意图)。被控端改选中模型 effort 即时反映。
-      if (capabilities) {
+      // Agent 在另一台电脑运行时选中的是那台目录里的模型,档位与被控端的记忆无关,不跟。
+      if (capabilities && !effectiveAgentDeviceId) {
         setDlSel((prev) => {
           if (!prev) return prev;
           const re = resolveDeviceLinkDraftDefaults(
@@ -1718,7 +1719,13 @@ export function NewMakerDraftRoute() {
         });
       }
     });
-  }, [isDeviceLinkDraft, effectiveDeviceLinkDeviceId, capabilityAgentKind, capabilities]);
+  }, [
+    isDeviceLinkDraft,
+    effectiveDeviceLinkDeviceId,
+    effectiveAgentDeviceId,
+    capabilityAgentKind,
+    capabilities,
+  ]);
 
   // ── worktree 勾选 = 工作端记忆的镜像(2026-07-29 用户裁决:状态只属于用户) ────
   // 本地草稿读本地 draft.worktreeEnabled;device-link 远程草稿只接受被控端明确返回的
@@ -1988,8 +1995,16 @@ export function NewMakerDraftRoute() {
         modelId: string;
         effort?: Effort;
       },
+      /**
+       * 这次选择落在被控电脑自己的目录里(从另一台电脑改回被控电脑):此刻闭包里 Agent 仍在
+       * 另一台电脑,但目标模型属于被控电脑,照常写穿。
+       */
+      options?: { taskComputerSelection?: boolean },
     ) => {
       if (!isDeviceLinkDraft || !effectiveDeviceLinkDeviceId) return;
+      // Agent 在另一台电脑运行:选中的是那台目录里的模型,不写进被控端的新建草稿记忆
+      // (档位已由 ChatInput 记进本机为那台电脑记的一份)。
+      if (effectiveAgentDeviceId && !options?.taskComputerSelection) return;
       const model = target?.modelId ?? dlSel?.model ?? deviceLinkInitial?.model;
       if (!model) return;
       // 只改 Fast 时也要带上激活档(被控端 trigger 要更新激活 effort)。给了显式目标就**只**
@@ -2020,7 +2035,14 @@ export function NewMakerDraftRoute() {
         ])
         .catch(() => {});
     },
-    [isDeviceLinkDraft, effectiveDeviceLinkDeviceId, capabilityAgentKind, dlSel, deviceLinkInitial],
+    [
+      isDeviceLinkDraft,
+      effectiveDeviceLinkDeviceId,
+      effectiveAgentDeviceId,
+      capabilityAgentKind,
+      dlSel,
+      deviceLinkInitial,
+    ],
   );
 
   // Fast 可用判定:本地 + device-link 统一走 resolveFastSupported(共享 per-provider 逻辑,
@@ -2071,9 +2093,12 @@ export function NewMakerDraftRoute() {
     : supportsFastMode
       ? resolveDraftFast(calibratedDraftModel)
       : false;
-  // 计划模式草稿态:仅本地草稿支持(device-link 远程草稿 v1 不透传,入口也不显示;
-  // 创建后进会话仍可经运行时隧道切换)。
-  const effectivePlanMode = isDeviceLinkDraft ? false : chatPrefs.planMode === true;
+  // 远程开关仅属于这台设备的当前引擎，不读写控制端的本机偏好。
+  const remotePlanKey = `${effectiveDeviceLinkDeviceId ?? ''}:${capabilityAgentKind}`;
+  const [remoteDraftPlan, setRemoteDraftPlan] = useState<{ key: string; enabled: boolean } | null>(null);
+  const effectivePlanMode = isDeviceLinkDraft
+    ? capabilities?.planMode?.supported === true && remoteDraftPlan?.key === remotePlanKey && remoteDraftPlan.enabled
+    : chatPrefs.planMode === true;
 
   // 选中模型 + effort:device-link 用镜像 holder(deviceLinkInitial,被控端草稿值已按 capabilities
   // 校准);本地草稿用 chatPrefs(逐字节不变)。device-link 在 holder seed 完成前(等隧道 / 能力)
@@ -2088,8 +2113,14 @@ export function NewMakerDraftRoute() {
   }, [usesDeviceCatalog, deviceLinkInitial, calibratedDraftModel, localDraftEffort]);
 
   // 远程草稿的权限档 / 来源同样取镜像 holder;本地走 chatPrefs。
+  // Agent 在另一台电脑运行时权限仍在被控电脑上生效:那台的能力清单里没有这一档(被夹掉)时,回落到
+  // 被控电脑草稿的权限档(被控电脑自己校准过),不掺控制端本机的偏好。
   const chatInitialPermissionMode = isDeviceLinkDraft
-    ? (deviceLinkInitial?.permissionMode ?? chatPrefs.permissionMode)
+    ? (deviceLinkInitial?.permissionMode ??
+      (effectiveAgentDeviceId
+        ? (remoteDraftState.value?.permissionMode as PermissionMode | undefined)
+        : undefined) ??
+      chatPrefs.permissionMode)
     : chatPrefs.permissionMode;
   // 显式连接始终随草稿提交；未指定连接时才按 UI 与 main 的默认来源差异决定是否固化。
   const localProviderIdForDraft = useMemo<string | null>(() => {
@@ -2112,7 +2143,7 @@ export function NewMakerDraftRoute() {
   const chatInitialProviderId = useMemo<string | null>(() => {
     if (!usesDeviceCatalog) return localProviderIdForDraft;
     return deviceLinkInitial?.providerId || effectiveSourceIdForModel(
-      deviceProviders,
+      agentCatalogProviders,
       null,
       draftInitialModel,
       capabilityAgentKind,
@@ -2120,7 +2151,7 @@ export function NewMakerDraftRoute() {
   }, [
     usesDeviceCatalog,
     localProviderIdForDraft,
-    deviceProviders,
+    agentCatalogProviders,
     deviceLinkInitial?.providerId,
     draftInitialModel,
     capabilityAgentKind,
@@ -2213,9 +2244,8 @@ export function NewMakerDraftRoute() {
       });
       const workingDirChanged = req.workingDir !== draft.workingDir;
 
-      // chip 绑 workingDir;附件绑设备。两者条件不同,见各自函数的注释。
+      // 引用绑定目标目录；控制端附件由出站上传层搬运，切换设备时保留。
       if (deviceChanged || workingDirChanged) stripProjectRelativeMentions();
-      if (deviceChanged) dropPathBackedAttachments();
 
       // 作废那三个无 TTL 快照 —— 但**不是**「指向设备就做」(Codex review 第 30 轮 P1,我上一轮
       // 收敛时写错的条件)。evict 不是幂等清理,而是一次**有副作用的状态转移**:它 notify
@@ -2238,7 +2268,11 @@ export function NewMakerDraftRoute() {
       // 远程运行配置。给了 snapshot 就当场定;没给且换了设备就打回未加载,由 seed effect 接手 ——
       // 不打回的话 seed effect 会拿**上一台**的 capabilities + defaults 种下 dlSel 并把新设备记成
       // 「已 seed」,等新设备真正的值到达时 seedKey 又把重种挡掉,于是向新设备提交上一台的配置。
-      if (req.remoteSnapshot) {
+      if (req.remoteSnapshot && !deviceChanged && effectiveAgentDeviceId) {
+        // 同一台被控电脑重新验证,但 Agent 在另一台电脑运行:草稿的模型属于那台的目录,被控电脑
+        // 的能力快照校准不了它(store 也不会清掉那台的选择)。只刷新被控电脑的草稿值。
+        setRemoteDraftState({ status: 'ready', value: req.remoteSnapshot.defaults });
+      } else if (req.remoteSnapshot) {
         const { capabilities: freshCaps, defaults: freshDefaults } = req.remoteSnapshot;
         dlSeedKeyRef.current = req.deviceId ? `${req.deviceId}:${capabilityAgentKind}` : null;
         dlSeedCapabilitiesRef.current = freshCaps;
@@ -2335,10 +2369,10 @@ export function NewMakerDraftRoute() {
     [
       effectiveDeviceLinkDeviceId,
       effectiveRemoteHostId,
+      effectiveAgentDeviceId,
       draft.workingDir,
       capabilityAgentKind,
       stripProjectRelativeMentions,
-      dropPathBackedAttachments,
     ],
   );
 
@@ -2720,13 +2754,16 @@ export function NewMakerDraftRoute() {
     [isDeviceLinkDraft, patchActivePrefs],
   );
   // 计划模式草稿开关:写当前 vendor prefs(发送建会话时经 planModeEnabled 落库)。
-  // device-link 远程草稿不显示入口(onPlanModeChange 不下发),这里只处理本地。
+  // 远程草稿随创建参数提交，不修改被控端的新建默认值。
   const handlePlanModeChange = useCallback(
     (enabled: boolean) => {
-      if (isDeviceLinkDraft) return;
+      if (isDeviceLinkDraft) {
+        setRemoteDraftPlan({ key: remotePlanKey, enabled });
+        return;
+      }
       patchActivePrefs({ planMode: enabled });
     },
-    [isDeviceLinkDraft, patchActivePrefs],
+    [isDeviceLinkDraft, remotePlanKey, patchActivePrefs],
   );
   // 用户在草稿里切来源 → 记进当前 vendor 的 prefs(切 vendor / 重启后由 initialProviderId 回填,
   // 发送时也以此为准)。null = 清除显式选择,回落默认路由。与 model/effort 同口径。
@@ -2790,33 +2827,61 @@ export function NewMakerDraftRoute() {
       // 必须无条件进入 store 的 rebase：当前 renderer 的 draft.vendor 可能还停在 storage
       // event 到达前的旧 Harness。switchVendor 自身同值早返，不会制造额外写入。
       switchVendor(selection.vendor);
-      // ── 远程 Agent:模型面板里选到了另一台电脑上的模型(或从那台回到本机)──────────
-      // 连 Agent 的运行位置一起换。任务、项目、附件都在本机,一概不动;只有模型目录与这次
-      // 选择改按目标电脑。
+      // ── 远程 Agent:模型面板里选到了另一台电脑上的模型(或从那台回到任务所在电脑)──────
+      // 连 Agent 的运行位置一起换。任务、项目、附件都在任务所在电脑(本机或被控电脑),一概不动;
+      // 只有模型目录与这次选择改按目标电脑。
       const targetAgentDevice = selection.agentDevice;
       const switchesAgentDevice =
         targetAgentDevice !== undefined &&
         (targetAgentDevice?.deviceId ?? null) !== (effectiveAgentDeviceId ?? null);
-      if (switchesAgentDevice && targetAgentDevice) {
-        // 这次显式选择就是那台电脑上的种子:seed key 按播种 effect 的构造逐字前置,并标记
-        // 控制端已触碰 —— 那台的 capabilities 到达时只做合法性夹紧,不会换成那台的默认模型
-        // (与下方跨引擎选择同一条修法)。
+      // 任务建到被控电脑时权限在被控电脑上生效,换 Agent 所在电脑不改它。
+      const taskComputerPermission = isDeviceLinkDraft
+        ? deviceLinkInitial?.permissionMode
+        : undefined;
+      // 这次显式选择就是目标目录里的种子:seed key 按播种 effect 的构造逐字前置,并标记控制端
+      // 已触碰 —— 目标电脑的 capabilities 到达时只做合法性夹紧,不会换成那台的默认模型(与下方
+      // 跨引擎选择同一条修法)。
+      const seedSwitchedCatalog = (catalogOwnerDeviceId: string) => {
         dlRuntimeTouchedRef.current = true;
-        dlSeedKeyRef.current = `${targetAgentDevice.deviceId}:${dbToMakerAgentKind(
+        dlSeedKeyRef.current = `${catalogOwnerDeviceId}:${dbToMakerAgentKind(
           normalizeDbAgentKind(selection.vendor),
         )}`;
         dlSeedCapabilitiesRef.current = null;
         setDlSel({
           model: selection.modelId,
-          // 没有档位的模型由播种夹紧按那台的目录补成合法值。
+          // 没有档位的模型由播种夹紧按目标目录补成合法值。
           effort: selection.effort ?? 'high',
           fastMode: selection.fast,
           providerId: selection.providerId,
+          ...(taskComputerPermission ? { permissionMode: taskComputerPermission } : {}),
         });
+      };
+      if (switchesAgentDevice && targetAgentDevice) {
+        seedSwitchedCatalog(targetAgentDevice.deviceId);
         patchDraft({
           agentDeviceId: targetAgentDevice.deviceId,
           agentDeviceName: targetAgentDevice.name,
         });
+        return;
+      }
+      if (switchesAgentDevice && isDeviceLinkDraft && effectiveDeviceLinkDeviceId) {
+        // 回到被控电脑:这次选择落在被控电脑的目录里,同样作为那里的种子(不写本机草稿),并与
+        // 被控电脑目录里的普通选中一样把 effort / Fast 写穿被控端(目标显式给,理由同下)。
+        seedSwitchedCatalog(effectiveDeviceLinkDeviceId);
+        pushActiveDraftPref(
+          {
+            ...(selection.effort ? { effort: selection.effort } : {}),
+            fast: selection.fast,
+          },
+          {
+            agent: dbToMakerAgentKind(normalizeDbAgentKind(selection.vendor)),
+            providerId: selection.providerId,
+            modelId: selection.modelId,
+            ...(selection.effort ? { effort: selection.effort } : {}),
+          },
+          { taskComputerSelection: true },
+        );
+        patchDraft({ agentDeviceId: null, agentDeviceName: null });
         return;
       }
       if (switchesAgentDevice) {
@@ -2928,6 +2993,8 @@ export function NewMakerDraftRoute() {
       draft.vendor,
       usesDeviceCatalog,
       catalogDeviceId,
+      isDeviceLinkDraft,
+      effectiveDeviceLinkDeviceId,
       effectiveAgentDeviceId,
       deviceLinkInitial,
       capabilities,
@@ -3041,8 +3108,13 @@ export function NewMakerDraftRoute() {
 
   // 运行 Agent 的电脑同理：被解除配对 / 撤销远程控制后不再可选，回到「Agent 在本机」。
   // 任务本来就在本机，项目、附件与草稿都不用动。
+  // 分享来的供应商(`share:<id>`)不在设备列表里，也不自动回落：已收到的分享由同区域与跨区域
+  // 两路分别加载，任一路还没到或暂时失败时列表并不完整，不能据此判定分享已不在。草稿保留原
+  // 选择，发送时由主进程给出「已暂停 / 已不可用」的原因，用户可换模型。
   useEffect(() => {
-    if (!effectiveAgentDeviceId || !selectableDevicesLoaded) return;
+    if (!effectiveAgentDeviceId) return;
+    if (isProviderShareAgentDeviceId(effectiveAgentDeviceId)) return;
+    if (!selectableDevicesLoaded) return;
     if (selectableDevices.some((d) => d.deviceId === effectiveAgentDeviceId)) return;
     log.warn('[new-maker] selected agent computer is no longer selectable, running the agent here');
     patchDraft({ agentDeviceId: null, agentDeviceName: null });
@@ -3750,10 +3822,13 @@ export function NewMakerDraftRoute() {
                 effort,
                 permissionMode,
                 fastMode: effectiveFastMode,
+                planModeEnabled: effectivePlanMode,
                 providerId,
               },
-              deviceProviders,
+              deviceProviders: agentCatalogProviders,
               capabilityAgentKind,
+              // Agent 在另一台电脑运行:被控电脑把它记进任务,模型与来源属于那台的目录。
+              agentDeviceId: effectiveAgentDeviceId,
             });
             let created: { sessionId?: string; workDir?: string } | null = null;
             const remoteSessionId =
@@ -3872,6 +3947,7 @@ export function NewMakerDraftRoute() {
               makerChatStore.setSessionRuntime(remoteSessionId, {
                 agentKind: createArgs.agentKind,
                 fastMode: createArgs.fastMode,
+                planModeEnabled: createArgs.planMode ?? false,
                 sessionProviderId: createArgs.providerId ?? null,
               });
               const preNavDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);
@@ -3963,9 +4039,11 @@ export function NewMakerDraftRoute() {
                       pendingLeadInput: message,
                       options: draftEnableOrcaOptions(
                         effectiveCollab,
-                        deviceProviders,
+                        agentCatalogProviders,
                         !deviceProvidersLoading,
                         true,
+                        // agentCatalogProviders 是草稿 Agent 所在那一处的目录(null = 被控电脑)。
+                        effectiveAgentDeviceId ?? null,
                       ),
                     },
                   }
@@ -4563,6 +4641,7 @@ export function NewMakerDraftRoute() {
       remoteModelListStatus,
       remoteDraftState.status,
       deviceProviders,
+      agentCatalogProviders,
       deviceProvidersLoading,
       effectiveDeviceLinkDeviceId,
       effectiveDeviceLinkDeviceName,
@@ -4834,10 +4913,12 @@ export function NewMakerDraftRoute() {
               effort: draftInitialEffort,
               permissionMode: chatInitialPermissionMode,
               fastMode: effectiveFastMode,
+              planModeEnabled: effectivePlanMode,
               providerId: chatInitialProviderId,
             },
-            deviceProviders,
+            deviceProviders: agentCatalogProviders,
             capabilityAgentKind,
+            agentDeviceId: effectiveAgentDeviceId,
           });
           let created: { sessionId?: string; workDir?: string } | null = null;
           const remoteSessionId = await (
@@ -4920,9 +5001,11 @@ export function NewMakerDraftRoute() {
                     pendingLeadInput: objective,
                     options: draftEnableOrcaOptions(
                       effectiveCollab,
-                      deviceProviders,
+                      agentCatalogProviders,
                       !deviceProvidersLoading,
                       true,
+                      // agentCatalogProviders 是草稿 Agent 所在那一处的目录(null = 被控电脑)。
+                      effectiveAgentDeviceId ?? null,
                     ),
                   },
                 }
@@ -5195,6 +5278,7 @@ export function NewMakerDraftRoute() {
       remoteModelListStatus,
       remoteDraftState.status,
       deviceProviders,
+      agentCatalogProviders,
       deviceProvidersLoading,
       vendorAuthGate,
       authVendor,
@@ -5209,6 +5293,7 @@ export function NewMakerDraftRoute() {
       draftInitialEffort,
       chatInitialPermissionMode,
       effectiveFastMode,
+      effectivePlanMode,
       effectiveRemoteHostId,
       effectiveExtraDirs,
       chatInitialProviderId,
@@ -5258,15 +5343,15 @@ export function NewMakerDraftRoute() {
   // 点击后走安装引导、不会立即填入,只显示建议本身。插件清单变化时随之重算。
   // 可用插件表按插件清单与工作目录缓存:filterGhostsForWorkdir 会同步查询目录禁用表,
   // 不能在每次渲染 / 每条建议上重复调用。
-  const installedGhosts = useInstalledGhosts();
+  const installedGhosts = useInstalledGhosts(!isDeviceLinkDraft);
   const usableSuggestionGhosts = useMemo(
     () =>
       new Map(
-        filterGhostsForWorkdir(installedGhosts, effectiveWorkingDir)
+        (isDeviceLinkDraft ? [] : filterGhostsForWorkdir(installedGhosts, effectiveWorkingDir))
           .filter((g) => g.enabled)
           .map((g) => [g.manifest.id, g]),
       ),
-    [effectiveWorkingDir, installedGhosts],
+    [isDeviceLinkDraft, effectiveWorkingDir, installedGhosts],
   );
   const suggestionComposerText = useCallback(
     (suggestion: HomeTaskSuggestion) => {
@@ -5474,7 +5559,7 @@ export function NewMakerDraftRoute() {
           if (droppedItems.files.length > 0) {
             e.preventDefault();
             e.stopPropagation();
-            guardedAttachmentState.addFiles(droppedItems.files);
+            attachmentState.addFiles(droppedItems.files);
           }
           if (droppedItems.unclassified.length > 0) {
             // Do not synchronously consume item-less entries: a single
@@ -5485,7 +5570,7 @@ export function NewMakerDraftRoute() {
               classifyPath: (path) =>
                 window.electronAPI.localDb.sessionShare.classifyPath({ path }),
             }).then(({ files }) => {
-              if (files.length > 0) guardedAttachmentState.addFiles(files);
+              if (files.length > 0) attachmentState.addFiles(files);
             });
           }
         }}
@@ -5666,7 +5751,7 @@ export function NewMakerDraftRoute() {
                     initialPermissionMode={chatInitialPermissionMode}
                     initialProviderId={chatInitialProviderId}
                     planModeEnabled={effectivePlanMode}
-                    onPlanModeChange={isDeviceLinkDraft ? undefined : handlePlanModeChange}
+                    onPlanModeChange={handlePlanModeChange}
                     fastMode={effectiveFastMode}
                     onFastModeChange={handleFastModeChange}
                     onWorkingDirChange={handleWorkingDirChange}
@@ -5753,7 +5838,7 @@ export function NewMakerDraftRoute() {
                     }
                     narrowToolbar={isDraftToolbarNarrow}
                     paletteMaxHeight={240}
-                    attachmentState={guardedAttachmentState}
+                    attachmentState={attachmentState}
                     draftKey={NEW_MAKER_DRAFT_KEY}
                     focusOnStorageKeyChange
                     // 「+」始终显示(与对话界面一致):无项目裸态也可加引用目录,作为本次对话的上下文。
@@ -5785,24 +5870,6 @@ export function NewMakerDraftRoute() {
                     }
                   />
                 </div>
-                {/* Agent 在另一台电脑运行:任务和文件在本机,只有 Agent 在那台。与下面的远程设备
-                    标识同位置、同样式,两者互斥。 */}
-                {isAgentDeviceDraft && (
-                  <div className="mt-3 flex max-w-full items-center gap-2 self-center rounded-full border border-[var(--border-default)] bg-[var(--surface-chip)] px-3 py-1 text-12 text-[var(--text-secondary)]">
-                    {/* 与侧栏同一标识:Agent 图标 + 右上信号波纹。 */}
-                    <VendorIcon
-                      vendor={persistedAgentKind}
-                      size={persistedAgentKind === 'cc' ? 14 : 13}
-                      remote
-                      colorClassName="text-[var(--folder-item-icon)]"
-                    />
-                    <span className="min-w-0 truncate">
-                      {t('ccAgent.draft.agentDeviceBanner', {
-                        device: draft.agentDeviceName ?? effectiveAgentDeviceId ?? '',
-                      })}
-                    </span>
-                  </div>
-                )}
                 {/* device-link:为远程设备项目新建对话时的明显标识。让用户清楚这条对话会建在
                     被控设备上、属于那台机器的项目,而不是本机。放输入框正下方并与其水平居中
                     (父列 items-start,靠 self-center 相对 w-full 的输入框居中)。 */}
@@ -5828,6 +5895,27 @@ export function NewMakerDraftRoute() {
                             device:
                               effectiveDeviceLinkDeviceName ?? effectiveDeviceLinkDeviceId ?? '',
                           })}
+                    </span>
+                  </div>
+                )}
+                {/* Agent 在另一台电脑运行:只有 Agent 在那台,任务和文件留在任务所在电脑。与上面的
+                    远程设备标识同样式;任务建到被控电脑时两条都显示(上一条已写明任务在哪台)。 */}
+                {isAgentDeviceDraft && (
+                  <div className="mt-3 flex max-w-full items-center gap-2 self-center rounded-full border border-[var(--border-default)] bg-[var(--surface-chip)] px-3 py-1 text-12 text-[var(--text-secondary)]">
+                    {/* 与侧栏同一标识:Agent 图标 + 右上信号波纹。 */}
+                    <VendorIcon
+                      vendor={persistedAgentKind}
+                      size={persistedAgentKind === 'cc' ? 14 : 13}
+                      remote
+                      colorClassName="text-[var(--folder-item-icon)]"
+                    />
+                    <span className="min-w-0 truncate">
+                      {t(
+                        isDeviceLinkDraft
+                          ? 'ccAgent.draft.agentDeviceElsewhereBanner'
+                          : 'ccAgent.draft.agentDeviceBanner',
+                        { device: draft.agentDeviceName ?? effectiveAgentDeviceId ?? '' },
+                      )}
                     </span>
                   </div>
                 )}
@@ -5895,6 +5983,13 @@ export function NewMakerDraftRoute() {
                 providerId: form.providerId,
                 initialTask: form.initialTask || undefined,
                 workerPermissionMode: form.workerPermissionMode,
+                ...(form.executionDeviceId
+                  ? {
+                      executionDeviceId: form.executionDeviceId,
+                      ...(form.workingDir ? { executionWorkingDir: form.workingDir } : {}),
+                    }
+                  : {}),
+                ...(form.agentDeviceId !== undefined ? { agentDeviceId: form.agentDeviceId } : {}),
               },
             });
             setCreateWorkerOpen(false);
@@ -5906,6 +6001,14 @@ export function NewMakerDraftRoute() {
           // SSH 远程草稿(draft.remoteHostId):worker 在远端 spawn,模型清单按 SSH
           // 口径过滤,与本路由 ChatInput 候选及 main 侧 remote-worker guard 同口径。
           sshRemote={!!effectiveRemoteHostId}
+          // 首个 Worker 也可放到另一台电脑：仅本机草稿(非 SSH、非远程 Agent)。
+          executionDevicesEnabled={
+            !effectiveDeviceLinkDeviceId && !effectiveRemoteHostId && !isAgentDeviceDraft
+          }
+          // Worker 的 Agent 默认跟草稿选的 Agent 所在电脑(远程供应商)，面板里列出与输入框同一份
+          // 其他电脑 / 分享的供应商，可以换到任务所在电脑或别处。
+          leadAgentDeviceId={effectiveAgentDeviceId ?? null}
+          remoteAgentDevices={effectiveRemoteHostId ? undefined : remoteAgentDevices}
         />
 
         {/* 添加远程项目弹窗 (入口在 mode pill 的 FolderPickerPopover 里, gate 走 hasAnyRemoteTarget =

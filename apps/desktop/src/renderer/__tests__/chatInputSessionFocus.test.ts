@@ -180,15 +180,16 @@ describe('ChatInput session switch focus contract', () => {
     ).toHaveLength(1);
     expect(
       chatInputSource.match(
-        /placeGhostAtComposerStart\(editor, ghost, installedGhostsRef\.current\)/g,
+        /placeGhostAtComposerStart\(editor, ghost, composerGhostsRef\.current\)/g,
       ),
     ).toHaveLength(1);
     expect(chatInputSource).toContain('pendingGhostId: undefined');
 
     expect(capabilitySelectionBlock).toContain("selectedItem.type === 'plugin-command'");
-expect(capabilitySelectionBlock).toContain('!ghost?.enabled');
+    expect(capabilitySelectionBlock).toContain('!ghost?.enabled');
+    expect(capabilitySelectionBlock).toContain('composerGhostsRef.current.find(');
     expect(capabilitySelectionBlock).toContain(
-      'placeGhostAtComposerStart(editor, ghost, installedGhostsRef.current);',
+      'placeGhostAtComposerStart(editor, ghost, composerGhostsRef.current);',
     );
     expect(capabilitySelectionBlock).toContain('closeAtPanel();');
     expect(capabilitySelectionBlock).not.toContain('focusIOSSimulatorPanel');

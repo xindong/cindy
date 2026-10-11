@@ -28,3 +28,34 @@ export function resolveSharedProviderId(
   return effectiveSourceIdForModel(shared, null, model, kind)
     ?? actualSourceIdForModel(shared, null, model, kind);
 }
+
+/**
+ * 供应商分享的受邀者：来源只能是分享给它的那个供应商(没指定时也落到它上面)，而且这个供应商
+ * 要为本 Agent 提供所选模型(口径同上：新路由优先，再按实际路由)。只看分享的这一个供应商，
+ * 不会因为本机别的供应商有同名模型而放行。返回 null = 不允许。
+ */
+export function resolveGuestProviderId(
+  views: readonly ProviderView[],
+  sharedProviderId: string | null | undefined,
+  isAllowed: (providerId: string) => boolean,
+  kind: AgentKind,
+  model: string,
+  providerId: string | null | undefined,
+): string | null {
+  if (!sharedProviderId || !isAllowed(sharedProviderId)) return null;
+  if (providerId && providerId !== sharedProviderId) return null;
+  if (!model) return null;
+  const shared = views.filter((view) => view.id === sharedProviderId);
+  return effectiveSourceIdForModel(shared, sharedProviderId, model, kind)
+    ?? actualSourceIdForModel(shared, sharedProviderId, model, kind);
+}
+
+/** 分享的供应商为本 Agent 提供的模型(受邀者 Claude Code 的可选模型只列这些)。 */
+export function guestProviderModelIds(
+  views: readonly ProviderView[],
+  providerId: string,
+  kind: AgentKind,
+): string[] {
+  const view = views.find((candidate) => candidate.id === providerId);
+  return (view?.models[kind] ?? []).filter((model) => model.disabled !== true).map((model) => model.id);
+}

@@ -5,6 +5,7 @@ import { MobileVendorIcon } from '@/components/MobileVendorIcon';
 import { useReduceMotionEnabled } from '@/hooks/useReduceMotion';
 import { useTheme, useThemedStyles, type ThemeColors } from '@/theme';
 import { spacing, typeScale, lineHeight, fontWeight, iconSize, iconStroke } from '@/theme/tokens';
+import { sessionAgentRunsOnOtherComputer } from './sessionAgentSwitch';
 import type { RemoteSessionListItem } from './sessionList';
 const HOME_SESSION_ROW_HEIGHT = 78;
 const HOME_SESSION_SINGLE_LINE_ROW_HEIGHT = 60;
@@ -50,6 +51,8 @@ export function SessionStatusMark({
           // Claude 星标 logo 视觉重量偏小,+1px 光学补偿对齐 Codex 标(刻意非阶梯值)。
           size={isClaudeCodeAgentKind(item.session.agentKind) ? 19 : iconSize.lg}
           vendor={item.session.agentKind}
+          // Agent 在被控电脑之外的另一台电脑运行(远程供应商):与桌面侧栏同一个波纹标识。
+          remote={sessionAgentRunsOnOtherComputer(item.session)}
         />
       )}
       {!archived && showDraftIndicator ? (
@@ -222,6 +225,13 @@ export const homeListStyles = (colors: ThemeColors) => StyleSheet.create({
     justifyContent: 'flex-end',
     minHeight: lineHeight.subtitle,
     paddingTop: 3,
+  },
+  /** 文字形态(单行)下并到标题行尾的定时 / 置顶标记。 */
+  sessionInlineIcons: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexShrink: 0,
+    gap: spacing.xs,
   },
   sessionTime: {
     color: colors.textTertiary,

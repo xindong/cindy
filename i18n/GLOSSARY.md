@@ -307,6 +307,10 @@ OAuth 2.0 Device Authorization Grant 中由用户在另一设备验证页输入�
 
 Chat Server 的群角色，可由人或伙伴担任；不要与伙伴主人或分工负责人混同。群设置成员行英文可简写 Owner。
 
+### Group Strategy
+
+供应商组为新任务选择组内电脑的规则：最少占用、轮询、按顺序、按权重。只决定新任务分到哪台，已开始的任务不迁移。
+
 ### Harness
 
 用于任务筛选、搜索筛选，以及用户确认并公开提交 Issue 时显示承载当前 Agent 的运行框架。五语暂统一保留英文 Harness；具体值固定使用 Claude Code、Codex、Pi 的公开全名，不使用 cc/cx/pi 等内部缩写。
@@ -403,6 +407,10 @@ issue #882：模型管理/新对话选择器的分类标签，对应 Gateway mod
 
 插件页二级 tab 的总览入口，承载已安装与推荐内容，与「我的发布」并列。该词不重复页面标题「插件」，并保持弱于一级 Plugin / Skill pill 的层级。
 
+### Pairing Code
+
+供应商分享申请的 4 位数字，只在受邀者「等待同意」界面与分享者审批弹窗 / 管理页待处理一栏出现，供双方核对是同一个人；不是密钥，不参与鉴权。与 OAuth 的 Device Code（设备码）是不同概念。
+
 ### Passkey
 
 WebAuthn 可发现凭证的用户可见名称，采用 Apple、Google 与 Microsoft 平台常见译法；先登记为 proposed，待产品术语评审后固化。
@@ -426,6 +434,14 @@ Plugin 声明的应用级完整页面能力；区别于会话内 Panel。V1 由 
 ### Process
 
 OS 进程语境(资源用量面板、浏览器 guest 进程、终端)。注意与 Thread→任务(消息流语境)区分:资源用量面板刻意不展示 OS 线程数,避免「线程」撞上 Thread 的既定裁决;若未来要展示,需为 OS thread 立同形异义条目再谈。
+
+### Provider Group
+
+某台电脑上某个供应商的一组运行位置：本机、我的其他电脑、通过分享链接加入的电脑（docs/product-rules/provider-groups.md）。这个供应商的使用都按组策略选一台组内电脑运行 Agent。中文用「供应商组」，不单用「分组」，避免与模型列表和设置页的模型分组混淆；组里的电脑称「组内电脑」。
+
+### Provider Sharing
+
+把自己电脑上的某个供应商分享给其他 Cindy 账号使用(docs/product-rules/provider-sharing.md)。中文一律用「分享」，不用「共享」——「共享」留给共享任务，两者是独立的授权关系；ja / ko 两个功能都自然译作「共有 / 공유」，靠「プロバイダー / 제공자」与「セッション / 세션」区分。界面上「管理分享」「分享 {供应商}」「分享给我的供应商」都属于本词。
 
 ### Qwen
 
@@ -519,6 +535,14 @@ Orca Worker 创建卡上的命名字段。它只是派活用的名字，不改�
 
 日志上报文案里对「App 自身运行日志」的用户可见说法。刻意不直接叫「日志」: 设置页同屏已有「日志目录」「Debug 日志」两处指本地文件, 而这里要表达的是被上报的那部分内容(基础设施运行记录, 不含对话)。proposed: 与「日志」的分工尚未产品裁决。
 
+### Share Link
+
+供应商分享的一次性链接：生成后 5 分钟内有效、只能使用一次。与共享任务的「邀请链接 / 邀请码」是不同的东西，不要混用。
+
+### Share Request
+
+受邀者打开分享链接、确认后发给分享者的请求；分享者「同意分享 / 拒绝申请」。受邀者可以「撤回申请」。
+
 ### Shared Session
 
 远程连接的多人版本，按单个任务共享完整上下文和同一 Agent，不作为独立会议产品。
@@ -544,6 +568,10 @@ Codex Subagent 的可选扩展调配开关。默认关闭以保留 Codex 原生 
 ### Teammate
 
 Cindy 里的**持久 AI 助手实体**（原名 Bot）：有长期身份、自有记忆与技能、模型候选链，可以通过有界私信互相沟通，也可以启动独立 Cindy 任务。产品定位参照「AI teammates」，故取人称名词而非机器名词。英文用法分两层：功能名与复数用 Teammates（侧栏标题），句中单数用小写 teammate（`this teammate`、`Archive teammate`）——故 checkCase 为 false。**与 IM 平台机器人严格区分**：Telegram Bot / Discord Bot / 飞书 bot / 企业微信机器人 / @BotFather / bot token 指的是消息平台上的 bot 账号，仍写作 Bot / 机器人，不改成本词；判据是「这个词指的是 Cindy 里那个持久助手实体」才用本词。覆盖 desktop 的 bots.* 命名空间、sidebar.tabs.bots、newChat.atMention.bot 与 mobile 的 devices.json bots.*。先登记为 proposed：改名刚落地，等 UI 走查与产品评审后再定 decided，届时再决定是否把「Bot」登记为各语言的 forbidden 译法（现在不能登记——存量 IM 平台 bot 文案会被大面积误伤）。
+
+### Todo
+
+伙伴独立事务清单，含交办与获准信息中的主动发现；项目、执行任务与PR仅可选关联。不替代Session任务生命周期。
 
 ### Token Plan
 

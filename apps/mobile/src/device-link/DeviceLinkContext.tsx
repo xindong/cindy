@@ -19,6 +19,7 @@ import {
   DeviceLinkError,
   CONTROLLER_CAPABILITY_MAKER_EVENT_BATCH_V1,
   CONTROLLER_CAPABILITY_SESSION_TEXT_SNAPSHOT_V1,
+  CONTROLLER_CAPABILITY_SESSION_LIST_MESSAGES_V1,
   CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
   DEVICE_LINK_CAPABILITY_COMPACT_MESSAGE_HISTORY_V1,
   DL_SUBSCRIBE_CHANNEL,
@@ -53,6 +54,10 @@ import {
   evictDeviceProviders,
   type DeviceProvidersPayload,
 } from '@/device-link/deviceProvidersCache';
+import {
+  clearAllProviderShareCatalogs,
+  evictProviderShareCatalogs,
+} from '@/device-link/providerShareCatalogCache';
 import {
   evictAgentCapabilitiesForDevice,
   resetAgentCapabilitiesCache,
@@ -160,6 +165,7 @@ import { createOfflineMirrorWipeQueue } from '@/device-link/offlineMirrorWipeQue
 import { hasMoreOlderMessages } from '@/session/messagePaging';
 import type { InputProjection, PendingInteraction, RemoteMessage } from '@/session/types';
 import { prepareVisualMockDeviceLinkContext } from '@/debug/visualMock';
+import { meterDeviceLinkInvokes, recordDeviceLinkPush } from '@/debug/deviceLinkTraffic';
 
 export interface DeviceLinkContextValue {
   status: DeviceLinkStatus;
@@ -216,6 +222,7 @@ const recoveryDiagnostics = new WeakMap<DeviceLinkClient, ReturnType<typeof crea
  * 被控端按能力缺失降级)。被控端只在看到对应能力后才发送新 wire 形状。
  */
 const CONTROLLER_CAPABILITIES = [
+  CONTROLLER_CAPABILITY_SESSION_LIST_MESSAGES_V1,
   SHARED_TASK_CAPABILITY,
   CONTROLLER_CAPABILITY_SESSION_TEXT_SNAPSHOT_V1,
   CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
@@ -482,6 +489,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     revokedDevicesStore.clearAll();
     resetDeviceResponsivenessTracking();
     clearAllDeviceProviders();
+    clearAllProviderShareCatalogs();
     clearAllDeviceModelMeta();
     resetAgentCapabilitiesCache();
     resetComposerPaletteCache();
@@ -958,6 +966,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
         requestTimeoutMs: 15_000,
       },
     });
+    meterDeviceLinkInvokes(client);
     clientRef.current = client;
     const catalogRefresh = createDeviceCatalogRefresh({
       connectionEpoch: () => connectionEpochRef.current,
@@ -1636,6 +1645,7 @@ export function routeFrame(env: Envelope, handlers: {
   if (peerLinkClosed) return;
   if (env.kind !== 'push' || !env.src) return;
   const push = env.payload as PushPayload;
+  recordDeviceLinkPush(push.channel, push.payload);
   dispatchCredentialSwitchOutcome(env.src, push.channel, push.payload);
   if (push.channel === 'local-db:task-tags:changed') {
     writeTaskTagCatalog(
@@ -2169,6 +2179,7 @@ function markOfflineDeviceMirrors(deviceIds: readonly string[]): void {
   for (const deviceId of deviceIds) {
     invalidateScheduleIndexForDevice(deviceId);
     evictDeviceProviders(deviceId);
+    evictProviderShareCatalogs(deviceId);
     evictDeviceModelMeta(deviceId);
     evictAgentCapabilitiesForDevice(deviceId);
     evictComposerPaletteCacheForDevice(deviceId);
@@ -2186,6 +2197,7 @@ function wipeUnavailableDeviceMirror(deviceId: string): void {
   // Drop the cached provider catalog so a returning/re-granted device re-fetches it
   // instead of serving a list frozen from a previous connection.
   evictDeviceProviders(deviceId);
+  evictProviderShareCatalogs(deviceId);
   evictDeviceModelMeta(deviceId);
   // 能力表与供应商目录同时机驱逐:桌面端重连 / 升级 / 重新授权后必须重取,
   // 否则模型 / 权限 / plan 支持度会先按旧能力渲染并接受点击。

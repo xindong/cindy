@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "d39d29a5-ebdb-4f3b-b4d4-49ace6649797",
+  "id": "86f88929-384d-4831-bf8e-a29b3d83ec85",
   "prevId": "d06b22f6-84f0-4f67-b5ab-0f13f2e21a2a",
   "tables": {
     "account_usage_snapshots": {
@@ -3568,6 +3568,34 @@
           "notNull": false,
           "autoincrement": false
         },
+        "execution_device_id": {
+          "name": "execution_device_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "remote_session_id": {
+          "name": "remote_session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_bridged_message_id": {
+          "name": "last_bridged_message_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "remote_released_at": {
+          "name": "remote_released_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -5164,13 +5192,6 @@
           "notNull": false,
           "autoincrement": false
         },
-        "title_source": {
-          "name": "title_source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "used_project_context": {
           "name": "used_project_context",
           "type": "integer",
@@ -5218,6 +5239,13 @@
         },
         "agent_device_id": {
           "name": "agent_device_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "orca_remote_lead": {
+          "name": "orca_remote_lead",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

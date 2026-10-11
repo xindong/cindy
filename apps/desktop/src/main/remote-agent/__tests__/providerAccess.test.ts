@@ -9,10 +9,10 @@ import path from 'node:path';
 
 import type { AgentEvent, AgentSessionHandle } from '@cindy/maker-core';
 import type { ProviderView } from '@cindy/model-providers';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { startRemoteAgentSession } from '../controller/startRemote';
-import { resolveSharedProviderId } from '../host/providerAccess';
+import { guestProviderModelIds, resolveGuestProviderId, resolveSharedProviderId } from '../host/providerAccess';
 import { createRemoteAgentHost, type HostedStartInput } from '../host/runHost';
 
 const RG = path.resolve(__dirname, '../../../../../ripgrep-bin', `${process.platform}-${process.arch}`, process.platform === 'win32' ? 'rg.exe' : 'rg');
@@ -42,6 +42,36 @@ describe('resolveSharedProviderId', () => {
     expect(resolveSharedProviderId(views, sharedOnly(['spark']), 'claude-code', 'opus', null)).toBe('spark');
     expect(resolveSharedProviderId(views, sharedOnly(['xd']), 'claude-code', 'sonnet', undefined)).toBeNull();
     expect(resolveSharedProviderId(views, sharedOnly([]), 'claude-code', 'opus', null)).toBeNull();
+  });
+});
+
+describe('resolveGuestProviderId (shared-provider guests)', () => {
+  const views = [view('xd', ['opus', 'haiku']), view('spark', ['opus', 'sonnet'])];
+  const allowed = (providerId: string) => providerId === 'spark';
+
+  it('pins the source to the shared provider, also when none is given', () => {
+    expect(resolveGuestProviderId(views, 'spark', allowed, 'claude-code', 'sonnet', 'spark')).toBe('spark');
+    expect(resolveGuestProviderId(views, 'spark', allowed, 'claude-code', 'sonnet', null)).toBe('spark');
+    expect(resolveGuestProviderId(views, 'spark', allowed, 'claude-code', 'opus', undefined)).toBe('spark');
+  });
+
+  it('refuses a model the shared provider does not offer, even if another provider here does', () => {
+    expect(resolveGuestProviderId(views, 'spark', allowed, 'claude-code', 'haiku', null)).toBeNull();
+    expect(resolveGuestProviderId(views, 'spark', allowed, 'claude-code', 'haiku', 'spark')).toBeNull();
+    expect(resolveGuestProviderId(views, 'spark', allowed, 'claude-code', '', null)).toBeNull();
+    expect(resolveGuestProviderId(views, 'spark', allowed, 'codex', 'sonnet', null)).toBeNull();
+  });
+
+  it('refuses another provider, a withdrawn share and a closed provider', () => {
+    expect(resolveGuestProviderId(views, 'spark', allowed, 'claude-code', 'opus', 'xd')).toBeNull();
+    expect(resolveGuestProviderId(views, undefined, allowed, 'claude-code', 'opus', null)).toBeNull();
+    expect(resolveGuestProviderId(views, 'spark', () => false, 'claude-code', 'opus', null)).toBeNull();
+  });
+
+  it('lists the shared provider\'s models for the agent', () => {
+    expect(guestProviderModelIds(views, 'spark', 'claude-code')).toEqual(['opus', 'sonnet']);
+    expect(guestProviderModelIds(views, 'spark', 'codex')).toEqual([]);
+    expect(guestProviderModelIds(views, 'gone', 'claude-code')).toEqual([]);
   });
 });
 
@@ -86,11 +116,14 @@ function recordingHandle(input: HostedStartInput, calls: { sends: number; models
   } as unknown as AgentSessionHandle;
 }
 
-async function setup(allowed: Set<string>) {
+async function setup(allowed: Set<string>, guest?: { sharedProviderId: string }) {
   const project = path.join(root, 'proj');
   fs.mkdirSync(project, { recursive: true });
   const inputs: HostedStartInput[] = [];
   const calls = { sends: 0, models: [] as unknown[][] };
+  const binds: Array<{ hostSessionId: string; providerId: string }> = [];
+  const releases = { count: 0 };
+  const views = guest ? [view('xd', ['opus', 'haiku']), view('spark', ['opus', 'sonnet'])] : [view('xd', ['opus']), view('spark', ['opus'])];
   const host = createRemoteAgentHost({
     isAgentAvailable: () => true,
     startHosted: async (input) => {
@@ -98,19 +131,27 @@ async function setup(allowed: Set<string>) {
       return recordingHandle(input, calls);
     },
     isControllerAuthorized: () => true,
+    ...(guest ? { controllerTrust: () => 'guest' as const } : {}),
     providerAccess: {
-      resolve: async (kind, model, providerId) =>
-        resolveSharedProviderId([view('xd', ['opus']), view('spark', ['opus'])], (id) => allowed.has(id), kind, model, providerId),
+      resolve: async (kind, model, providerId) => guest
+        ? resolveGuestProviderId(views, guest.sharedProviderId, (id) => allowed.has(id), kind, model, providerId)
+        : resolveSharedProviderId(views, (id) => allowed.has(id), kind, model, providerId),
       isAllowed: (id) => allowed.has(id),
     },
+    ...(guest ? {
+      bindGuestProviderRoute: async ({ hostSessionId, providerId }: { hostSessionId: string; providerId: string }) => {
+        binds.push({ hostSessionId, providerId });
+        return { routeToken: 'route-token', modelIds: ['opus', 'sonnet'], release: () => { releases.count += 1; } };
+      },
+    } : {}),
     captureOwner: () => 'owner',
     isOwnerCurrent: () => true,
     runsRoot: path.join(root, 'host'),
   });
-  const start = (providerId: string | null) => startRemoteAgentSession('claude-code', {
+  const start = (providerId: string | null, model = 'opus') => startRemoteAgentSession('claude-code', {
     sessionId: `task-${randomUUID()}`,
     workingDir: project,
-    model: 'opus',
+    model,
     providerId,
     permissionMode: 'default',
   }, {
@@ -121,7 +162,7 @@ async function setup(allowed: Set<string>) {
     isGitRepo: async () => false,
     newId: randomUUID,
   });
-  return { host, inputs, calls, start };
+  return { host, inputs, calls, binds, releases, start };
 }
 
 describe('remote agent provider access on the computer running the agent', () => {
@@ -154,6 +195,48 @@ describe('remote agent provider access on the computer running the agent', () =>
     await expect(handle.send({ content: [{ type: 'text', text: 'again' }] } as never)).rejects.toThrow('REMOTE_AGENT_PROVIDER_NOT_ALLOWED');
     expect(calls.sends).toBe(1);
     await handle.close({ reason: 'navigation' });
+    host.dispose();
+  });
+
+  it('leaves a same-account model-only switch untouched', async () => {
+    const { host, calls, start } = await setup(new Set(['spark']));
+    const handle = await start('spark');
+    await handle.setModel!('opus');
+    // 不带来源的换模型原样到达 Agent(沿用当前来源)，不经授权核对。
+    expect(calls.models.at(-1)).toEqual(['opus', null]);
+    await handle.close({ reason: 'navigation' });
+    host.dispose();
+  });
+});
+
+describe('shared-provider guest models on the computer running the agent', () => {
+  const guest = { sharedProviderId: 'spark' };
+
+  it('refuses to start a guest on a model the shared provider does not offer', async () => {
+    const { host, inputs, binds, start } = await setup(new Set(['spark', 'xd']), guest);
+    // haiku 只有本机的 xd 提供：不能借它用到本机的其它供应商。
+    await expect(start(null, 'haiku')).rejects.toThrow('REMOTE_AGENT_PROVIDER_NOT_ALLOWED');
+    await expect(start('xd', 'opus')).rejects.toThrow('REMOTE_AGENT_PROVIDER_NOT_ALLOWED');
+    expect(inputs).toHaveLength(0);
+    expect(binds).toHaveLength(0);
+    host.dispose();
+  });
+
+  it('binds the guest to the shared provider and checks every model switch', async () => {
+    const { host, inputs, calls, binds, releases, start } = await setup(new Set(['spark', 'xd']), guest);
+    const handle = await start(null, 'opus');
+    expect(inputs[0]?.options.providerId).toBe('spark');
+    expect(inputs[0]?.guestProvider).toEqual({ providerId: 'spark', modelIds: ['opus', 'sonnet'], routeToken: 'route-token' });
+    expect(binds).toEqual([{ hostSessionId: inputs[0]!.hostSessionId, providerId: 'spark' }]);
+
+    // 只换模型(没带来源)也核对，并显式钉在分享的供应商上。
+    await expect(handle.setModel!('haiku')).rejects.toThrow('REMOTE_AGENT_PROVIDER_NOT_ALLOWED');
+    await expect(handle.setModel!('opus', { providerId: 'xd' })).rejects.toThrow('REMOTE_AGENT_PROVIDER_NOT_ALLOWED');
+    await handle.setModel!('sonnet');
+    expect(calls.models).toEqual([['sonnet', { providerId: 'spark' }]]);
+
+    await handle.close({ reason: 'navigation' });
+    await vi.waitFor(() => expect(releases.count).toBe(1));
     host.dispose();
   });
 });

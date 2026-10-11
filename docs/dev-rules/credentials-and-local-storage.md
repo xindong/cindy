@@ -170,6 +170,15 @@ Claude.ai 登录，也不得收集、存储或中转订阅凭证。Cindy 因此�
   提供给支持人员。复用本机日志目录入口，不自动上传。旧响应适配器可省略 headers，
   旧 IPC 消费者可忽略 retryAt；Mobile 暂不增加等待时间界面。
 
+### 运行时会话续期退避
+
+Desktop 的运行时 refresh 遇到瞬时失败后，主动调用与定时重试共用至少 60 秒的等待；
+429 的有效 `Retry-After` 更长时按服务器等待时间执行。等待期间的调用不发请求、不延长
+原期限，也不清除凭证。成功续期/登录清除等待，登录代次改变后旧等待不约束新账号。
+冷启动、确定性失效和同机 token 替换恢复继续沿用原有判定。状态只留在进程内存中。
+实现见 `main/authRefreshBackoff.ts`、`main/authManager.ts`；回归见
+`main/__tests__/authRefreshBackoff.test.ts`。
+
 ## 路径与生命周期
 
 | 数据性质                            | 正确位置                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -185,6 +194,10 @@ Claude.ai 登录，也不得收集、存储或中转订阅凭证。Cindy 因此�
 | 旧跨 profile 的 worktree 借用租约   | `app.getPath('appData')/Cindy/shared-worktree-runtime-leases`，内置模拟器下线后不再创建共享租约；回收器仍读取旧证据并重试已有 `.release` 回执，不能因进程退出就移除保护。普通 Agent 的当前 profile 租约照常创建与释放                                                                                                                                                                                           |
 | 旧版 worktree 回收器兼容锁          | 不再创建新的跨 profile Git 锁；保留旧回执对 `<commonGitDir>/worktrees/<id>/locked` 及更早 `.worktree-keep` 的清理。仅当最后一个共享借用结束且自建文件身份和内容仍匹配时删除，不覆盖用户锁；失败沿用 `.release` 重试                                                                                                                                                                                             |
 | 跨 profile 的 worktree 回收日志位置 | `app.getPath('appData')/Cindy/shared-worktree-recycle-journals`，仍按日志目录哈希发布原 profile 日志位置，兼容可能同时运行的旧客户端；新客户端不再读取其他 profile 的日志来借用工程。不复制恢复状态、不代替 owner 执行恢复                                                                                                                                                                                      |
+| 供应商分享：分享者电脑上的受邀者用量 | `userData/remote-agent/provider-share-usage.json`，按（日期、分享、成员、Agent、供应商、模型）聚合 token 与轮次，原子替换写入，保留 400 天；只含服务端生成的分享与成员 id，不含昵称、对话或凭证。成员删除后保留（管理页不再显示），同一人重新加入时接续 |
+| 供应商按使用方的用量 | `userData/owners/<账号>/provider-usage-by-party.json`，按（日期、供应商、使用方：本机或同账号另一台电脑的设备 id、Agent、模型）聚合 token 与轮次，原子替换写入，保留 400 天；只含供应商 id、设备 id 与模型名，不含对话或凭证。按账号存放（供应商 id 在不同账号下会重复），从开始记录起不补历史 |
+| 供应商分享：受邀者会话登记 | `userData/remote-agent/guest-sessions.json`（控制端摘要 → 本机侧任务与原生会话 id），只用来限制受邀者只能恢复自己的会话，并在分享删除时精确清理影子工作区、附件与会话记录 |
+| 供应商分享：跨区域标记 | `userData/remote-agent/provider-share-regions.json`，账号摘要 → 对方区域；**不含凭证**。跨区连接凭证只在内存里，用新身份名片重新换取；没有标记的账号从不联系对方区域 |
 | 用户明确导出的文件                  | 用户选择或任务明确指定的目标路径                                                                                                                                                                                                                                                                                                                                                                                |
 
 - 内置 Skill 的官方身份只授予当前 manifest 已提交且指纹匹配的 bundle：`.active` 必须是

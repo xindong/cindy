@@ -43,4 +43,13 @@ describe('checkDeviceRoute', () => {
     await expect(checkDeviceRoute(async () => views, 'claude-code', 'anthropic', 'claude-opus-5-5'))
       .resolves.toBeNull();
   });
+
+  it('分享来的供应商不可用时保留分享原因', async () => {
+    for (const code of ['REMOTE_AGENT_SHARE_PAUSED', 'REMOTE_AGENT_SHARE_REMOVED', 'REMOTE_AGENT_SHARE_UNAVAILABLE']) {
+      await expect(checkDeviceRoute(async () => { throw new Error(`[${code}] nope`); }, 'claude-code', null, 'x'))
+        .resolves.toBe(code);
+    }
+    await expect(checkDeviceRoute(async () => { throw new Error('see [REMOTE_AGENT_SHARE_PAUSED]'); }, 'claude-code', null, 'x'))
+      .resolves.toBe('unreachable');
+  });
 });

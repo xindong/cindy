@@ -1,9 +1,22 @@
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import type { DeviceHostedSession } from '../base-agent.js';
 import {
+  DEVICE_HOSTED_DISALLOWED_CLAUDE_TOOLS,
+  DEVICE_HOSTED_GUEST_CLAUDE_TOOLS,
+  describeDeviceHostedLinkActivity,
+  deviceHostedBuiltinToolName,
+  deviceHostedClaudeNote,
   deviceHostedEnvironmentNote,
+  deviceHostedGuestAgentDenial,
+  deviceHostedGuestClaudeMdExcludes,
+  deviceHostedGuestSessionRoot,
   deviceHostedPiEnvValue,
+  isInsideDeviceHostedRoot,
   deviceHostedSubagentAllows,
   parseClaudeAgentToolRule,
   type DeviceHostedAgentToolRule,
@@ -24,6 +37,27 @@ function hosted(overrides: Partial<DeviceHostedSession> = {}): DeviceHostedSessi
   };
 }
 
+describe('deviceHostedGuestClaudeMdExcludes', () => {
+  const sessionRoot = path.resolve('/data/cindy/remote-agent/workspaces/c1/s1');
+  const mirrorRoot = path.join(sessionRoot, 'fs');
+  const slash = (value: string) => value.split(path.sep).join('/');
+
+  it('is empty for same-account sessions', () => {
+    expect(deviceHostedGuestClaudeMdExcludes(hosted({ mirrorRoot }))).toEqual([]);
+  });
+
+  it('excludes every CLAUDE.md above the session root, not inside it', () => {
+    const excludes = deviceHostedGuestClaudeMdExcludes(hosted({ mirrorRoot, guest: true }));
+    const parent = path.dirname(sessionRoot);
+    const top = path.parse(sessionRoot).root;
+    expect(excludes).toContain(slash(path.join(parent, 'CLAUDE.md')));
+    expect(excludes).toContain(path.join(parent, 'CLAUDE.local.md'));
+    expect(excludes).toContain(slash(path.join(top, 'CLAUDE.md')));
+    expect(excludes).toContain(`${slash(path.join(parent, '.claude', 'rules'))}/**`);
+    expect(excludes.some((entry) => entry.startsWith(slash(sessionRoot)) || entry.startsWith(sessionRoot))).toBe(false);
+  });
+});
+
 describe('deviceHostedPiEnvValue', () => {
   it('omits the mirror root when the shadow is not mirrored', () => {
     expect(JSON.parse(deviceHostedPiEnvValue(hosted()))).not.toHaveProperty('mirrorRoot');
@@ -32,6 +66,41 @@ describe('deviceHostedPiEnvValue', () => {
   it('carries the mirror root so the bridge can map shadow ancestors back', () => {
     expect(JSON.parse(deviceHostedPiEnvValue(hosted({ mirrorRoot: '/runs/ws/abc/s1/fs' }))).mirrorRoot)
       .toBe('/runs/ws/abc/s1/fs');
+  });
+
+  it('marks shared-user sessions and leaves same-account values unchanged', () => {
+    expect(JSON.parse(deviceHostedPiEnvValue(hosted({ guest: true }))).guest).toBe(true);
+    expect(deviceHostedPiEnvValue(hosted())).toBe(JSON.stringify({
+      url: 'http://127.0.0.1:4000/t/tok/',
+      token: 'tok',
+      cwd: '/Users/me/project',
+      platform: 'darwin',
+      shell: 'zsh',
+    }));
+  });
+});
+
+describe('device-hosted guest session root', () => {
+  it('is the session directory above the virtual workspace, or the shadow directory on the old protocol', () => {
+    const sessionRoot = path.resolve('/data/cindy/remote-agent/workspaces/c1/s1');
+    expect(deviceHostedGuestSessionRoot(hosted({ mirrorRoot: path.join(sessionRoot, 'fs') }), '/ignored')).toBe(sessionRoot);
+    expect(deviceHostedGuestSessionRoot(hosted(), path.resolve('/shadow/dir'))).toBe(path.resolve('/shadow/dir'));
+  });
+
+  it('accepts paths inside the root (including symlinked spellings) and rejects siblings and parents', () => {
+    const base = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'device-hosted-root-')));
+    try {
+      const root = path.join(base, 'session');
+      mkdirSync(path.join(root, 'fs', 'workspace'), { recursive: true });
+      expect(isInsideDeviceHostedRoot(root, root)).toBe(true);
+      expect(isInsideDeviceHostedRoot(path.join(root, 'fs', 'workspace', 'SKILL.md'), root)).toBe(true);
+      expect(isInsideDeviceHostedRoot(base, root)).toBe(false);
+      expect(isInsideDeviceHostedRoot(path.join(base, 'session-other', 'x'), root)).toBe(false);
+      expect(isInsideDeviceHostedRoot(path.join(base, '..session', 'x'), root)).toBe(false);
+      expect(isInsideDeviceHostedRoot(path.join(root.toUpperCase(), 'fs'), root, 'win32')).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 
@@ -159,5 +228,69 @@ describe('deviceHostedSubagentAllows', () => {
   it('lets a custom definition override a built-in name', () => {
     const rules = new Map<string, DeviceHostedAgentToolRule>([['Plan', { tools: ['Write'] }]]);
     expect(deviceHostedSubagentAllows('Plan', 'Write', rules)).toBe(true);
+  });
+});
+
+describe('device-hosted guest Claude tools', () => {
+  it('never lists tools that act on this computer, its other sessions or its user account', () => {
+    const forbidden = [
+      ...DEVICE_HOSTED_DISALLOWED_CLAUDE_TOOLS,
+      // 其他会话
+      'ListAgents', 'SendMessage',
+      // 本机用户的 claude.ai 账号
+      'Artifact', 'RemoteTrigger', 'DesignSync', 'ClaudeDesign', 'Projects', 'Workflow', 'PushNotification',
+      'ReadNotifications', 'SendFeedback', 'ProposeSkills', 'ProposeGoal',
+      // 本机文件、命令与网络
+      'Monitor', 'SendUserFile', 'LSP', 'WebFetch', 'OfferChromeSetup',
+    ];
+    for (const name of forbidden) expect(DEVICE_HOSTED_GUEST_CLAUDE_TOOLS).not.toContain(name);
+  });
+
+  it('keeps subagents, questions, plan mode, tasks, skills and web search', () => {
+    for (const name of ['Agent', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', 'TodoWrite', 'ToolSearch', 'Skill', 'WebSearch']) {
+      expect(DEVICE_HOSTED_GUEST_CLAUDE_TOOLS).toContain(name);
+    }
+  });
+
+  it('refuses subagent isolation and leaves other calls alone', () => {
+    expect(deviceHostedGuestAgentDenial('Agent', { prompt: 'x', isolation: 'remote' })).toMatch(/isolation/);
+    expect(deviceHostedGuestAgentDenial('Task', { prompt: 'x', isolation: 'worktree' })).toMatch(/isolation/);
+    expect(deviceHostedGuestAgentDenial('Agent', { prompt: 'x' })).toBeNull();
+    expect(deviceHostedGuestAgentDenial('Agent', undefined)).toBeNull();
+    expect(deviceHostedGuestAgentDenial('WebSearch', { isolation: 'remote' })).toBeNull();
+  });
+
+  it('judges the WebFetch that runs on the guest computer like the built-in one, without promising it to the model', () => {
+    expect(deviceHostedBuiltinToolName('mcp__cindy_exec__WebFetch')).toBe('WebFetch');
+    expect(deviceHostedBuiltinToolName('mcp__cindy_exec__Bash')).toBe('Bash');
+    expect(deviceHostedBuiltinToolName('mcp__cindy_exec__Monitor')).toBeNull();
+    expect(deviceHostedBuiltinToolName('mcp__other__WebFetch')).toBeNull();
+    // 受邀者电脑上的 Cindy 较旧时没有这个工具，说明里不提。
+    expect(deviceHostedClaudeNote(hosted({ guest: true }), '/local')).not.toContain('WebFetch');
+  });
+});
+
+describe('describeDeviceHostedLinkActivity (#5764)', () => {
+  it('tells a slow but moving link from a stuck request and from no traffic at all', () => {
+    expect(describeDeviceHostedLinkActivity({
+      lastActivityAt: 9_700,
+      execRequests: 169,
+      execResponses: 165,
+      execMaxInFlight: 81,
+      execOldestPending: { method: 'fs/readFile', waitedMs: 1_250 },
+      execRoundTripAvgMs: 1_600,
+      execRoundTripMaxMs: 4_210,
+      httpInFlight: 2,
+    }, 10_000)).toBe(
+      'execution environment answered 165/169 requests, oldest unanswered fs/readFile waiting 1.3s, '
+      + 'round trip avg 1.6s max 4.2s, peak in flight 81, 2 tool requests in flight, last link activity 0.3s ago',
+    );
+    expect(describeDeviceHostedLinkActivity({
+      lastActivityAt: null,
+      execRequests: 0,
+      execResponses: 0,
+      execMaxInFlight: 0,
+      httpInFlight: 0,
+    }, 10_000)).toBe('execution environment answered 0/0 requests, peak in flight 0, no link activity yet');
   });
 });

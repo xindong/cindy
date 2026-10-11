@@ -14,7 +14,7 @@ describe('ChatInput Ghost snapshot contract', () => {
 
   it('derives the $ palette from the workdir-filtered installed snapshot', () => {
     expect(source).toContain(
-      'const ghostsForCommand = useMemo(\n    () => filterGhostsForWorkdir(installedGhosts, workingDir),',
+      'const ghostsForCommand = pluginsForMenu;',
     );
     expect(source).toContain(
       'const ghostCommandItems = useMemo(() => {\n    if (!isGhostSigil) return [];\n    return ghostsForCommand',
@@ -26,12 +26,13 @@ describe('ChatInput Ghost snapshot contract', () => {
     expect(source).toContain('const installedGhostsRef = useRef(installedGhosts);');
     expect(source).toContain('installedGhostsRef.current = installedGhosts;');
     expect(source).toMatch(
-      /const eligibleGhosts\s*=\s*filterGhostsForWorkdir\(\s*installedGhostsRef\.current,\s*workingDirRef\.current,\s*\);[\s\S]*?expandGhostCommand\(text,\s*eligibleGhosts\)/,
+      /const eligibleGhosts: GhostCommandSource\[\]\s*=\s*sourceRemoteGhosts \?\? filterGhostsForWorkdir\(\s*installedGhostsRef\.current,\s*workingDirRef\.current,\s*\);[\s\S]*?expandGhostCommand\(text,\s*eligibleGhosts\)/,
     );
   });
 
   it('does not expose controller-local plugin rows in device-link sessions', () => {
-    expect(source).toContain('if (deviceLinkDeviceId !== null) return [];');
+    expect(source).toContain('useInstalledGhosts(deviceLinkDeviceId === null)');
+    expect(source).toContain('? remoteComposerGhosts.ghosts');
     expect(source).toContain(
       '[deviceLinkDeviceId, pluginsForMenu, pluginAvailableIds, remoteHostId, t]',
     );

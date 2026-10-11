@@ -10,7 +10,7 @@
 
 import type { Editor } from '@tiptap/core';
 
-import type { InstalledGhost } from '../../../shared/ghost';
+import type { GhostCommandSource } from '../../../shared/ghostComposer';
 import { findGhostCommandMatch } from './GhostCommandDecoration';
 
 /** Match popover selection timing: close first, then focus the final editable position. */
@@ -22,8 +22,8 @@ export function focusComposerEndNextFrame(editor: Editor): void {
 
 export function placeGhostAtComposerStart(
   editor: Editor,
-  ghost: InstalledGhost,
-  installedRoster: readonly InstalledGhost[],
+  ghost: GhostCommandSource,
+  installedRoster: readonly GhostCommandSource[],
 ): boolean {
   const command = ghost.manifest.command;
   if (!command || editor.isDestroyed || !editor.isEditable) return false;

@@ -164,7 +164,10 @@
     "retryToolInput": "Couldn't load input. Retry",
     "toolResultCompacted": "Full tool output was trimmed (original size {{size}})",
     "mermaidEmpty": "Empty Mermaid diagram.",
-    "diffEditCount": "{{n}} edits"
+    "diffEditCount": "{{n}} edits",
+    "groupSentNamed": "Sent from group “{{name}}”",
+    "groupSent": "Sent from a group",
+    "sourceGroupId": "Group ID: {{id}}"
   },
   "actions": {
     "attachmentsPrefix": "Attachments: {{names}}",
@@ -257,12 +260,24 @@
       "usageReset": "Usage reset, continued automatically",
       "pending": "Reconnecting…",
       "pendingWithProgress": "Reconnecting {{attempt}}/{{total}}…",
+      "groupSwitchPending": "Switching to another computer…",
       "details": "Attempt {{attempt}}/{{total}} · {{count}} reconnects in this session",
       "detail": {
         "reason": "Interruption reason",
         "attempt": "Attempt {{attempt}}/{{total}}",
         "sessionTotal": "{{count}} reconnects in this session"
-      }
+      },
+      "agentSwitch": {
+        "usage-limit": "{{from}} hit its usage limit; continued on {{to}}",
+        "auth": "{{from}} is signed out; continued on {{to}}",
+        "unavailable": "Couldn’t reach {{from}}; continued on {{to}}",
+        "overload": "{{from}} was overloaded; continued on {{to}}"
+      },
+      "agentReconnect": {
+        "named": "Reconnected to {{computer}}; continued there",
+        "unnamed": "Reconnected to the original computer; continued there"
+      },
+      "groupSwitch": "Continued on another computer automatically"
     },
     "modelLabel": "Model",
     "sessionLabel": "Session",

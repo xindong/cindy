@@ -42,6 +42,7 @@ import { DEFAULT_DRAFT_SESSION_TITLE } from '@cindy/maker-shared/session-title';
 import type { DeviceLinkConnectionStatus, Session } from '@/lib/ccAgent.types';
 import type { ListStatusFilter } from '@/lib/sessionService';
 import type { AutomationScheduleSessionInfo } from '../cc-agent/lib/automationSidebarGrouping';
+import { buildBindingMap, type ScheduleBinding } from '../scheduler/lib/scheduleBindingIndex';
 import { clearCachedMessages } from './mirrorCacheClient';
 
 export type RemoteSessionStatus = Exclude<ListStatusFilter, 'all'>;
@@ -56,8 +57,10 @@ interface DeviceShard {
   /** 已拿到过权威列表的状态桶；空数组同样需要被记住，避免每次渲染都重复拉取。 */
   loadedStatuses: Set<RemoteSessionStatus>;
   scheduleIndex?: ReadonlyMap<string, AutomationScheduleSessionInfo>;
+  scheduleBindings?: ReadonlyMap<string, ScheduleBinding[]>;
 }
 
+const EMPTY_SCHEDULE_BINDINGS: readonly ScheduleBinding[] = Object.freeze([]);
 const shards = new Map<string, DeviceShard>();
 let mergedScheduleIndex: ReadonlyMap<string, AutomationScheduleSessionInfo> = new Map();
 function recomputeScheduleIndex(): void {
@@ -549,6 +552,17 @@ function stamp(
 }
 
 const actions = {
+  setDeviceScheduleBindings(deviceId: string, bindings: readonly ScheduleBinding[]): void {
+    const shard = shards.get(deviceId);
+    if (!shard) return;
+    const next = buildBindingMap(bindings);
+    if (JSON.stringify([...(shard.scheduleBindings ?? [])]) === JSON.stringify([...next])) return;
+    shard.scheduleBindings = next;
+    subs.forEach((fn) => fn());
+  },
+  getSessionScheduleBindings(deviceId: string, sessionId: string): readonly ScheduleBinding[] {
+    return shards.get(deviceId)?.scheduleBindings?.get(sessionId) ?? EMPTY_SCHEDULE_BINDINGS;
+  },
   setDeviceScheduleIndex(
     deviceId: string,
     index: ReadonlyMap<string, AutomationScheduleSessionInfo>,
@@ -645,6 +659,7 @@ const actions = {
       connectionStatus,
       sessions: nextSessions,
       scheduleIndex: existing?.scheduleIndex,
+      scheduleBindings: existing?.scheduleBindings,
       loadedStatuses,
     });
     recompute();
@@ -1443,5 +1458,16 @@ export function useRemoteScheduleIndex(): ReadonlyMap<string, AutomationSchedule
     subscribe,
     () => mergedScheduleIndex,
     () => mergedScheduleIndex,
+  );
+}
+
+export function useRemoteSessionScheduleBindings(
+  deviceId: string | null | undefined,
+  sessionId: string,
+): readonly ScheduleBinding[] {
+  return useSyncExternalStore(
+    subscribe,
+    () => deviceId ? actions.getSessionScheduleBindings(deviceId, sessionId) : EMPTY_SCHEDULE_BINDINGS,
+    () => EMPTY_SCHEDULE_BINDINGS,
   );
 }

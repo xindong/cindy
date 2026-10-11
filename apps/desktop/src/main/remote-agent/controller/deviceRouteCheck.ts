@@ -25,10 +25,19 @@ export function deviceOffersModel(
   );
 }
 
-export type DeviceRouteRejection = 'unreachable' | 'not-offered';
+/** 分享来的供应商不可用时保留具体原因(已暂停 / 已不可用 / 暂时不可用)，不归为「连不上」。 */
+export type ProviderShareRouteRejection =
+  | 'REMOTE_AGENT_SHARE_PAUSED'
+  | 'REMOTE_AGENT_SHARE_REMOVED'
+  | 'REMOTE_AGENT_SHARE_UNAVAILABLE';
+
+export type DeviceRouteRejection = 'unreachable' | 'not-offered' | ProviderShareRouteRejection;
+
+const SHARE_REJECTION = /^\[(REMOTE_AGENT_SHARE_(?:PAUSED|REMOVED|UNAVAILABLE))\]/;
 
 /**
  * 读那台的目录并判定。目录读不到(离线、未授权远控、旧版本) = unreachable；
+ * 分享来的供应商被暂停 / 移除 / 暂时不可用时返回对应的分享原因；
  * 读到了但没有这个模型 / 来源没开放 = not-offered；可用返回 null。
  */
 export async function checkDeviceRoute(
@@ -40,8 +49,9 @@ export async function checkDeviceRoute(
   let views: ProviderView[];
   try {
     views = await readViews();
-  } catch {
-    return 'unreachable';
+  } catch (error) {
+    const share = SHARE_REJECTION.exec(error instanceof Error ? error.message : '')?.[1];
+    return share ? share as ProviderShareRouteRejection : 'unreachable';
   }
   return deviceOffersModel(views, agent, providerId, modelId) ? null : 'not-offered';
 }

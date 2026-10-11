@@ -45,6 +45,30 @@ function chatData(overrides: Record<string, unknown> = {}) {
 }
 
 describe('parseBotGroupChatData', () => {
+  it.each(['AUTH_REQUIRED', 'private diagnostic', undefined])('preserves only allowlisted runtime failure codes from the computer: %s', runtimeFailureCode => {
+    const data = chatData({ messages: [{ id: 'failure', sequence: 1, kind: 'notice', authorKind: 'system',
+      authorName: 'Bot', content: '', createdAt: 1, noticeCode: 'member-failed', runtimeFailureCode }] });
+    const parsed = parseBotGroupChatData(data)!;
+    expect(parsed.messages[0].runtimeFailureCode).toBe(runtimeFailureCode === 'AUTH_REQUIRED' ? runtimeFailureCode : undefined);
+    expect(JSON.stringify(parsed.messages)).not.toContain('private diagnostic');
+  });
+  it('preserves server member identities and removal capability', () => {
+    const parsed = parseBotGroupChatData(chatData({ serverBacked: true, supportsMemberRemoval: true,
+      members: [{ botId: 'human', actorId: 'actor', actorKind: 'human', isOwned: false, name: 'Person', status: 'active' }] }));
+    expect(parsed).toMatchObject({ serverBacked: true, supportsMemberRemoval: true,
+      members: [expect.objectContaining({ actorId: 'actor', actorKind: 'human', isOwned: false })] });
+  });
+
+  it('preserves a server join notice through the phone projection', () => {
+    const joined = { id: 'joined', sequence: 20, kind: 'notice', authorKind: 'system', authorBotId: null,
+      authorName: 'Taylor', content: 'Taylor joined the group', noticeCode: 'member-joined',
+      planId: null, createdAt: 20 };
+    const parsed = parseBotGroupChatData(chatData({ messages: [joined],
+      lastMessage: { authorKind: 'system', authorName: 'Taylor', preview: joined.content, noticeCode: joined.noticeCode, createdAt: 20 } }))!;
+    expect(parsed.messages[0]).toMatchObject(joined);
+    expect(parsed.lastMessage).toMatchObject({ authorKind: 'system', noticeCode: 'member-joined', authorName: 'Taylor' });
+  });
+
   it('validates the host projection field by field and keeps host paths off the phone', () => {
     const parsed = parseBotGroupChatData(chatData())!;
     expect(parsed.messages.map((message) => message.id)).toEqual(['m1', 'm2', 'm4']);
@@ -139,6 +163,7 @@ describe('actions', () => {
     ['[INVALID_PARAMS] MEMBER_LIMIT', 'MEMBER_LIMIT'],
     [new Error('[NOT_FOUND] NOT_FOUND'), 'NOT_FOUND'],
     [new Error('[INVALID_PARAMS] MEMBER_UNAVAILABLE'), 'MEMBER_UNAVAILABLE'],
+    [new Error('[INVALID_PARAMS] MENTION_UNAVAILABLE'), 'MENTION_UNAVAILABLE'],
     [new Error('[NOT_CONNECTED] not online within 1500ms'), null],
     [new Error('XPLAN_OPEN'), null],
   ])('reads the group error code of %s', (error, code) => {
@@ -178,5 +203,15 @@ describe('actions', () => {
     expect(nextBotGroupSendAttempt(first, '', false, next, ['a1']).clientId).toBe('c2');
     expect(nextBotGroupSendAttempt(first, '', false, next, ['a2', 'a1']).clientId).toBe('c3');
     expect(nextBotGroupSendAttempt(first, '', false, next).clientId).toBe('c4');
+  });
+
+  it('reuses an unchanged target intent but gives changed IDs, order or Everyone a new key', () => {
+    let serial = 0;
+    const next = () => `c${++serial}`;
+    const first = nextBotGroupSendAttempt(null, '@Ann', false, next, [], { all: false, botIds: ['picked', 'other'] });
+    expect(nextBotGroupSendAttempt(first, '@Ann', false, next, [], { botIds: ['picked', 'other'], all: false })).toBe(first);
+    expect(nextBotGroupSendAttempt(first, '@Ann', false, next, [], { all: false, botIds: ['new'] }).clientId).toBe('c2');
+    expect(nextBotGroupSendAttempt(first, '@Ann', false, next, [], { all: false, botIds: ['other', 'picked'] }).clientId).toBe('c3');
+    expect(nextBotGroupSendAttempt(first, '@Ann', false, next, [], { all: true, botIds: ['picked', 'other'] }).clientId).toBe('c4');
   });
 });

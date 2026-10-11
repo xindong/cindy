@@ -94,6 +94,7 @@ const service = {
   continuePlan: vi.fn(),
   retryPlan: vi.fn(),
   editPlanStep: vi.fn(),
+  chatServer: { manage: vi.fn() },
 };
 
 describe('bot group remote resources', () => {
@@ -108,7 +109,8 @@ describe('bot group remote resources', () => {
       INSERT INTO bot_profiles VALUES ('mimi', NULL, 'active'), ('abu', NULL, 'active'), ('ghost', 5, 'active');
     `);
     h.ownerCurrent = () => true;
-    for (const fn of Object.values(service)) fn.mockReset();
+    for (const fn of Object.values(service)) if (typeof fn === 'function') fn.mockReset();
+    service.chatServer.manage.mockReset().mockResolvedValue({ ok: true });
     service.getGroup.mockResolvedValue({ ok: true, group: detail() });
     for (const name of ['updateGroup', 'setMembers', 'deleteGroup', 'continueRound', 'stopRound', 'startPlan', 'dismissPlan', 'continuePlan', 'retryPlan', 'editPlanStep'] as const) {
       service[name].mockResolvedValue({ ok: true });
@@ -169,6 +171,15 @@ describe('bot group remote resources', () => {
     expect(botGroupRemotePreview(summary())).toMatchObject({ translations: { 'zh-CN': '阿布：写好了' } });
   });
 
+  it('localizes join previews for every phone language without an author prefix', () => {
+    const preview = botGroupRemotePreview(summary({ openPlan: null, lastMessage: { authorKind: 'system',
+      authorName: 'Taylor', noticeCode: 'member-joined', preview: 'Fallback', createdAt: 50 } }));
+    expect(preview).toEqual({ fallback: 'Taylor joined the group', translations: {
+      'zh-CN': 'Taylor加入了群聊', 'zh-TW': 'Taylor加入了群聊',
+      ja: 'Taylorさんがグループに参加しました', ko: 'Taylor 님이 그룹에 참여했습니다',
+    } });
+  });
+
   it('sends the chat only to controllers that understand it, without host paths', async () => {
     const rich = await remoteResourceRegistry.get(context, { client: client([BOT_GROUP_CHAT_PRIMITIVE]), ref: ref('g1') });
     expect(rich.blocks?.[0]).toMatchObject({ primitive: BOT_GROUP_CHAT_PRIMITIVE });
@@ -182,6 +193,26 @@ describe('bot group remote resources', () => {
     expect(plain.blocks?.[0]).toMatchObject({ primitive: 'markdown' });
     expect(plain.blocks?.[0]?.data).toBeUndefined();
     expect(plain.blocks?.[0]?.fallbackMarkdown).toContain('**阿布**: 写好了');
+  });
+
+  it('projects current failures for existing phones without putting notices into the message cache', () => {
+    const group = detail();
+    const source = group.messages[0]!;
+    group.executionFailures = [{ executionId: 'run', epoch: 1, sourceMessageId: source.id,
+      botId: 'abu', botName: '阿布', code: 'AUTH_REQUIRED', planId: null }];
+    expect(botGroupRemoteChatData(group).messages).toContainEqual(expect.objectContaining({ id: 'execution-failure:run:1', runtimeFailureCode: 'AUTH_REQUIRED' }));
+    expect(group.messages).not.toContainEqual(expect.objectContaining({ kind: 'notice' }));
+    expect(botGroupRemoteChatData({ ...group, executionFailures: [] }).messages).toEqual(group.messages);
+  });
+
+  it.each(['member-joined', null] as const)('keeps system notices (%s) visible to old phones through the plain fallback', async noticeCode => {
+    const joined = { ...detail().messages[0]!, kind: 'notice' as const, authorKind: 'system' as const,
+      noticeCode, authorName: 'Taylor', content: 'Taylor joined the group' };
+    service.getGroup.mockResolvedValue({ ok: true, group: detail({ messages: [joined] }) });
+    const plain = await remoteResourceRegistry.get(context, { client: client(), ref: ref('g1') });
+    expect(plain.blocks?.[0]?.fallbackMarkdown).toBe('Taylor joined the group');
+    const rich = botGroupRemoteChatData(detail({ messages: [joined] }));
+    expect(rich.messages[0]).toMatchObject({ authorKind: 'system', noticeCode, authorName: 'Taylor' });
   });
 
   it('forwards actions to the group service and reports its error code when refused', async () => {
@@ -230,6 +261,38 @@ describe('bot group remote resources', () => {
       client: client(), collectionId: BOT_GROUP_REMOTE_COLLECTION_ID, actionId: 'stop', resourceRef: ref('g1'),
     })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(service.stopRound).not.toHaveBeenCalled();
+  });
+
+  it('preserves mixed membership, validates additions and removes a human by actor id', async () => {
+    const members: BotGroupSummary['members'] = [
+      { botId: 'mimi', actorId: 'cloud-mimi', actorKind: 'bot', isOwned: true, name: 'Mimi', avatar: '', avatarColor: '', status: 'active' },
+      { botId: 'person', actorId: 'actor-person', actorKind: 'human', isOwned: false, name: 'Guest', avatar: '', avatarColor: '', status: 'active' },
+      { botId: 'foreign', actorId: 'actor-foreign', actorKind: 'bot', isOwned: false, name: 'Foreign', avatar: '', avatarColor: '', status: 'active' },
+    ];
+    service.getGroup.mockResolvedValue({ ok: true, group: detail({ serverBacked: true, members }) });
+    const invoke = (actionId: string, input: Record<string, unknown>) => remoteResourceRegistry.invoke(context, {
+      client: client(), collectionId: BOT_GROUP_REMOTE_COLLECTION_ID, actionId, resourceRef: ref('g1'), input,
+    });
+    await invoke('set-members', { botIds: ['mimi', 'person', 'foreign', 'abu'] });
+    expect(service.setMembers).toHaveBeenLastCalledWith({ groupId: 'g1', botIds: ['mimi', 'person', 'foreign', 'abu'] });
+    for (const added of ['ghost', 'missing'])
+      await expect(invoke('set-members', { botIds: ['mimi', 'person', added] })).rejects.toMatchObject({ message: 'MEMBER_UNAVAILABLE' });
+    await expect(invoke('update', { organizerBotId: 'person' })).rejects.toMatchObject({ message: 'MEMBER_UNAVAILABLE' });
+    await invoke('update', { organizerBotId: 'foreign' });
+    expect(service.updateGroup).toHaveBeenLastCalledWith({ groupId: 'g1', organizerBotId: 'foreign' });
+    await invoke('plan-edit', { planId: 'p1', position: 0, action: 'reassign', botId: 'foreign' });
+    expect(service.editPlanStep).toHaveBeenLastCalledWith({ groupId: 'g1', planId: 'p1', position: 0, action: 'reassign', botId: 'foreign' });
+    await expect(invoke('plan-edit', { planId: 'p1', position: 0, action: 'reassign', botId: 'person' })).rejects.toThrow('MEMBER_UNAVAILABLE');
+    await invoke('remove-member', { actorId: 'actor-person' });
+    expect(service.chatServer.manage).toHaveBeenLastCalledWith({ groupId: 'g1', action: { type: 'member', action: 'remove', actorId: 'actor-person' } });
+    service.chatServer.manage.mockResolvedValueOnce({ ok: false, errorCode: 'ROLE_REQUIRED' });
+    await expect(invoke('remove-member', { actorId: 'actor-person' })).rejects.toThrow('PERMISSION_DENIED');
+    service.chatServer.manage.mockClear();
+    await expect(invoke('remove-member', { actorId: 'not-a-member' })).rejects.toThrow('NOT_FOUND');
+    expect(service.chatServer.manage).not.toHaveBeenCalled();
+    h.ownerCurrent = () => false;
+    await expect(invoke('remove-member', { actorId: 'actor-person' })).rejects.toThrow('Account changed');
+    expect(service.chatServer.manage).not.toHaveBeenCalled();
   });
 
   it('passes a phone’s attachments on with the phone that sent them', async () => {

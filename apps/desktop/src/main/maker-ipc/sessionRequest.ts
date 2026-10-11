@@ -113,6 +113,9 @@ export function readCreateSessionOpts(
     throwIpcError('INVALID_PARAMS', 'createSession opts must be an object');
   }
   const body = requireObject(input, 'createSession opts');
+  if (body.planMode !== undefined && typeof body.planMode !== 'boolean') {
+    throwIpcError('INVALID_PARAMS', 'planMode must be a boolean');
+  }
   if (Array.isArray(body.extraDirs) && body.extraDirs.some((dir) =>
     typeof dir === 'string' && isLibraryExtraDirSlot(dir.trim()))) {
     throwIpcError('INVALID_PARAMS', 'extraDirs must not contain Host-owned library slots');

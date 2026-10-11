@@ -42,6 +42,45 @@ beforeEach(() => {
 afterEach(() => { cleanup(); shareSelectionStore.reset(); vi.unstubAllGlobals(); });
 
 describe('chat interaction controls', () => {
+  it.each([undefined, 'private-diagnostic'])('keeps existing thread notices visible without a valid runtime code: %s', async runtimeFailureCode => {
+    mocks.thread.mockResolvedValue({ ok: true, root: message, replies: [{ ...message, id: 'old-notice', kind: 'notice',
+      content: 'Existing system notice', runtimeFailureCode }], hasMore: false });
+    render(<ChatThreadPanel group={group} rootId="root" onClose={vi.fn()} />);
+    expect(await screen.findByText('Existing system notice')).toBeTruthy();
+    expect(screen.queryByText('private-diagnostic')).toBeNull();
+  });
+
+  it('renders the current root failure beside the root and removes it when a refreshed page clears the failure', async () => {
+    const failure = { executionId: 'root-run', epoch: 1, sourceMessageId: message.id, botId: 'bot', botName: 'Bot', code: 'QUOTA_EXCEEDED', planId: null };
+    mocks.thread.mockResolvedValueOnce({ ok: true, root: message, executionFailures: [failure], replies: [], hasMore: true })
+      .mockResolvedValue({ ok: true, root: message, executionFailures: [], replies: [], hasMore: false });
+    render(<ChatThreadPanel group={group} rootId="root" onClose={vi.fn()} />);
+    const text = 'bots.groupChat.notice.runtimeFailure.QUOTA_EXCEEDED';
+    expect(await screen.findByText(text)).toBeTruthy();
+    expect(screen.getByText('Root message')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'bots.groupChat.timeline.loadEarlier' }));
+    await waitFor(() => expect(screen.queryByText(text)).toBeNull());
+    expect(screen.getByText('Root message')).toBeTruthy();
+  });
+
+  it('clears a retried failure on an older loaded Thread page without dropping its reply', async () => {
+    const latest = { ...message, id: 'latest', sequence: 100, content: 'Latest reply' };
+    const older = { ...message, id: 'older', sequence: 4, content: 'Earlier reply' };
+    const failure = { executionId: 'older-run', epoch: 1, sourceMessageId: older.id, botId: 'bot', botName: 'Bot', code: 'AUTH_REQUIRED', planId: null };
+    mocks.thread.mockResolvedValueOnce({ ok: true, root: message, replies: [latest], hasMore: true, executionFailures: [failure] })
+      .mockResolvedValueOnce({ ok: true, root: message, replies: [older], hasMore: false, executionFailures: [failure] })
+      .mockResolvedValue({ ok: true, root: message, replies: [latest], hasMore: true, executionFailures: [] });
+    render(<ChatThreadPanel group={group} rootId="root" onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'bots.groupChat.timeline.loadEarlier' }));
+    await screen.findByText('bots.groupChat.notice.runtimeFailure.AUTH_REQUIRED');
+    const root = screen.getByText('Root message').closest('article')!;
+    fireEvent.click(within(root).getByRole('button', { name: k('reactionCount') }));
+    await waitFor(() => expect(screen.queryByText('bots.groupChat.notice.runtimeFailure.AUTH_REQUIRED')).toBeNull());
+    expect(screen.getByText('Earlier reply')).toBeTruthy();
+    expect(screen.getByText('Latest reply')).toBeTruthy();
+    expect(mocks.thread.mock.calls.at(-1)?.[0]).toMatchObject({ sourceMessageIds: [older.id, latest.id] });
+  });
+
   it('preserves copy and image sharing beside thread replies and reactions in one toolbar', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined), reply = vi.fn();
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
@@ -116,6 +155,30 @@ describe('chat interaction controls', () => {
     fireEvent.click(screen.getByRole('button', { name: k('invite') }));
     fireEvent.click(screen.getByRole('button', { name: k('createLink') }));
     expect((await screen.findByRole('textbox', { name: k('inviteLink') }) as HTMLInputElement).value).toBe('cindy://chat-invite/test');
+  });
+
+  it.each([{ members: [] }, { members: [{ botId: 'namesake', name: 'Ann', status: 'active' as const }] }])('keeps a refused directed thread reply after the roster changes to %j', async ({ members }) => {
+    mocks.reply.mockResolvedValue({ ok: false, errorCode: 'MENTION_UNAVAILABLE' });
+    const view = render(<ChatThreadPanel group={{ ...group, members: [{ botId: 'bot', name: 'Ann', status: 'active' }] } as BotGroupDetail} rootId="root" onClose={vi.fn()} />);
+    const input = screen.getByRole('textbox', { name: k('replyPlaceholder') }) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: '@Ann hello' } });
+    fireEvent.click(screen.getByRole('button', { name: k('sendReply') }));
+    expect((await screen.findByRole('alert')).textContent).toBe('bots.groupChat.errors.mentionUnavailable');
+    expect(input.value).toBe('@Ann hello');
+    expect(mocks.reply).toHaveBeenCalledWith(expect.objectContaining({ mentions: { all: false, botIds: ['bot'] } }));
+    const original = mocks.reply.mock.calls[0]![0];
+    view.rerender(<Tooltip.Provider><ChatThreadPanel group={{ ...group, members } as BotGroupDetail} rootId="root" onClose={vi.fn()} /></Tooltip.Provider>);
+    fireEvent.click(screen.getByRole('button', { name: k('sendReply') }));
+    await waitFor(() => expect(mocks.reply).toHaveBeenCalledTimes(2));
+    expect(mocks.reply.mock.calls[1]![0]).toEqual(original);
+    expect(input.value).toBe('@Ann hello');
+    fireEvent.change(input, { target: { value: 'hello' } });
+    fireEvent.change(input, { target: { value: '@Ann hello' } });
+    mocks.reply.mockResolvedValue({ ok: true, messageId: 'accepted' });
+    fireEvent.click(screen.getByRole('button', { name: k('sendReply') }));
+    await waitFor(() => expect(mocks.reply).toHaveBeenCalledTimes(3));
+    expect(mocks.reply.mock.calls[2]![0].mentions).toEqual({ all: false, botIds: members.map(member => member.botId) });
+    expect(mocks.reply.mock.calls[2]![0].clientId).not.toBe(original.clientId);
   });
 
   it('keeps a failed reply draft and reuses its operation id; IME confirmation does not send', async () => {

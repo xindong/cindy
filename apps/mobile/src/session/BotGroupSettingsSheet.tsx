@@ -38,8 +38,9 @@ import { BotGroupMenu } from './BotGroupMenu';
 type Busy = 'name' | 'members' | 'organizer' | 'replyMode' | 'speakingMode' | 'delete' | null;
 type Act = (actionId: BotGroupRemoteActionId, input?: Record<string, unknown>) => Promise<unknown>;
 
-export function BotGroupSettingsSheet({ visible, group, host, identityFor, online, act, onClose, onClosed, onDeleted }: {
+export function BotGroupSettingsSheet({ visible, group, host, identityFor, online, act, onClose, onClosed, onDeleted, readOnly = false }: {
   visible: boolean;
+  readOnly?: boolean;
   group: BotGroupRemoteChatData;
   host: RemoteResourceHostTarget;
   identityFor: BotGroupIdentityLookup;
@@ -59,7 +60,7 @@ export function BotGroupSettingsSheet({ visible, group, host, identityFor, onlin
   const [errors, setErrors] = useState<Partial<Record<Exclude<Busy, null>, string>>>({});
   const [picking, setPicking] = useState(false);
   const nameFocused = useRef(false);
-  const teammates = useHostTeammates(host, visible && picking);
+  const teammates = useHostTeammates(host, visible && picking && !readOnly);
 
   // Follow renames that land from the computer while the field is not being edited.
   useEffect(() => { if (!nameFocused.current) setName(group.name); }, [group.name]);
@@ -69,11 +70,11 @@ export function BotGroupSettingsSheet({ visible, group, host, identityFor, onlin
   const canRemove = group.members.length > BOT_GROUP_MIN_MEMBERS;
   const canAdd = group.members.length < BOT_GROUP_MAX_MEMBERS;
   const addable = teammates.rows.filter((row) => !memberIds.includes(row.item.ref.id));
-  const locked = busy !== null || !online;
+  const locked = readOnly || busy !== null || !online;
 
   /** Run one change; the section shows the failure copy, or clears it on success. */
   const run = async (section: Exclude<Busy, null>, actionId: BotGroupRemoteActionId, input: Record<string, unknown>, fallbackKey: string) => {
-    if (busyRef.current) return false;
+    if (readOnly || busyRef.current) return false;
     busyRef.current = section;
     setBusy(section);
     setErrors((current) => ({ ...current, [section]: undefined }));
@@ -90,6 +91,7 @@ export function BotGroupSettingsSheet({ visible, group, host, identityFor, onlin
   };
 
   const saveName = async () => {
+    if (readOnly) return;
     const trimmed = name.trim();
     if (!trimmed) { setName(group.name); return; }
     if (trimmed === group.name) return;
@@ -148,12 +150,14 @@ export function BotGroupSettingsSheet({ visible, group, host, identityFor, onlin
           {group.members.map((member) => {
             const identity = identityFor(member.botId, member.name);
             const active = isActiveBotGroupMember(member);
+            const canOrganize = active && (!member.actorKind || member.actorKind === 'bot');
+            const removable = canRemove && (!member.actorKind || member.actorKind === 'bot' || group.supportsMemberRemoval === true);
             const organizer = member.botId === group.organizerBotId;
             // G12: one row per member; a tap opens its menu (设为负责人 / 移出群聊) instead of two inline buttons.
             const options = [
-              ...(!organizer && active ? [{ id: `organizer:${member.botId}`, title: t('groupChat.settings.setOrganizer') }] : []),
+              ...(!organizer && canOrganize ? [{ id: `organizer:${member.botId}`, title: t('groupChat.settings.setOrganizer') }] : []),
               {
-                id: `remove:${member.botId}`, title: t('groupChat.settings.remove'), destructive: true, disabled: !canRemove,
+                id: `remove:${member.botId}`, title: t('groupChat.settings.remove'), destructive: true, disabled: !removable,
                 ...(canRemove ? {} : { subtitle: t('groupChat.settings.minMembers', { min: BOT_GROUP_MIN_MEMBERS }) }),
               },
             ];
@@ -164,7 +168,11 @@ export function BotGroupSettingsSheet({ visible, group, host, identityFor, onlin
               sections={[{ id: 'member', options }]}
               onSelect={(id) => {
                 if (id.startsWith('organizer:')) void run('organizer', 'update', { organizerBotId: member.botId }, 'groupChat.settings.organizerSaveFailed');
-                else if (id.startsWith('remove:')) void setMembers(memberIds.filter((botId) => botId !== member.botId));
+                else if (id.startsWith('remove:')) {
+                  if (group.supportsMemberRemoval && member.actorId)
+                    void run('members', 'remove-member', { actorId: member.actorId }, 'groupChat.settings.membersSaveFailed');
+                  else void setMembers(memberIds.filter((botId) => botId !== member.botId));
+                }
               }}>
               {(open) => <Pressable accessibilityRole="button" accessibilityLabel={t('groupChat.settings.memberActions', { name: identity.name })}
                 disabled={locked} onPress={open}

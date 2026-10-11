@@ -908,6 +908,7 @@ export class Maker {
           effort: opts.effort,
           permissionMode: opts.permissionMode,
           fastMode: opts.fastMode,
+          ...(typeof opts.planMode === 'boolean' ? { planMode: opts.planMode } : {}),
           reviewMode: opts.reviewMode,
           parentSessionId: opts.parentSessionId,
           // remoteHostId: 远端 session 把目标机器持久化, 之后 resume / list 都能识别。
@@ -1063,6 +1064,8 @@ export class Maker {
       // 透传 remoteHostId 让 host 层在 hot path 上能 O(1) 判 local/remote
       // (不用每次 send 回 DB 读 SessionMeta — register.ts checkWorkDirExists 走这条)。
       remoteHostId: meta.remoteHostId ?? null,
+      // 取实际决定启动分支的 startOpts：任务记录事后读回的旧值不能把本机启动的会话标成远端。
+      agentDeviceId: startOpts.agentDeviceId || null,
       // 层 B：视觉桥钩子（per-session 优先，否则全局默认；缺省不传 = 零干扰）。
       visionBridge: startOpts.visionBridge ?? this.visionBridge,
       toolLoopReviewer: this.toolLoopReviewer,

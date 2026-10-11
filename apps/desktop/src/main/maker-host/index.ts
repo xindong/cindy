@@ -85,7 +85,9 @@ import { getWorkerLink, updateWorkerStatus } from '../localDb/orcaTeamStore.js';
 import { cleanupSessionTempAttachments } from '../maker-ipc/normalizeAttachments.js';
 import { resolveGhostFsSessionSnapshot } from '../maker-ipc/ghostFsSessionSnapshot.js';
 import { HOST_CONFIRM_TIMEOUT_MS } from '../maker-ipc/hostConfirmTiming.js';
-import { requestHostInteraction } from '../maker-ipc/interactionRouter.js';
+import { getActiveInteractionRoute, requestHostInteraction } from '../maker-ipc/interactionRouter.js';
+import { setAgentAppUpdateSessionHost } from '../agent-app-update/index.js';
+import { isAppUpdateOwnerTurn } from '../agent-app-update/callerAuthority.js';
 import { markKnownOrcaWorkerSession } from '../maker-ipc/orcaManualInterrupt.js';
 import { markOrcaMcpHydratedIfNeeded } from '../maker-ipc/orcaMcpHydrationCache.js';
 import { preparePersistedOrcaSessionStart } from '../maker-ipc/orcaSessionStartOptions.js';
@@ -112,13 +114,18 @@ import { prepareBotWorkspaceRuntime } from '../maker-ipc/botWorkspaceRuntime.js'
 import type { MakerSessionCreateOpts } from '../maker-ipc/sessionRequest.js';
 import {
   dispatchInterAgentMessage,
+  isActiveInputOwnerAuthored,
   isSessionInTurn,
   wireSessionToIpc,
 } from '../maker-ipc/register.js';
 import { MAKER_PUSH } from '../maker-ipc/channels.js';
+import { readProviderGroupBinding } from '../provider-group/bindings.js';
+import { getProviderGroupGuestSwitch } from '../provider-group/guestSwitch.js';
 import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
 import { remoteBackgroundInvoke, remoteInvoke } from '../device-link/index.js';
 import { handleListDevices, defaultDeps as deviceDirectoryDeps } from '../device-link/ipc.js';
+import { parseProviderShareAgentDeviceId } from '../device-link/providerShareGuest.js';
+import { t } from '../i18n.js';
 import { createHistoryRemoteDeps } from '../mcp-integrations/historyDevices.js';
 import { WorktreePool } from '../worktree/index.js';
 import { getReadyBinaryPath, getCachedBinaryStatus } from '../agent-binaries/index.js';
@@ -138,7 +145,7 @@ import {
   writeCodexHistoryHasProductPrompt,
 } from './session-storage.js';
 import { desktopMakerLogger } from './logger-adapter.js';
-import { outboundFetch } from './outbound-fetch.js';
+import { guardedOutboundFetch, outboundFetch } from './outbound-fetch.js';
 import { readCustomProviderKey } from '../secrets/providerSecretStore.js';
 import { createVisionBridge } from '../vision-bridge/vision-bridge.js';
 import {
@@ -339,9 +346,11 @@ import {
 } from './codex-custom-provider-route.js';
 import {
   buildCodexSubagentSpawnArgs,
+  codexHostUsesSmartSubagentRouting,
   resolveCodexSubagentRoutingProfile,
   type CodexSmartSubagentConfig,
 } from './codex-subagent-config.js';
+import { restrictCodexRoutesToGuestProvider } from './guest-provider-route-store.js';
 import {
   codexSmartSubagentRoutingSignature,
   prepareCodexSmartSubagentConfig,
@@ -388,6 +397,8 @@ type RemoteCcQuery = Awaited<
 >;
 
 let _maker: Maker | null = null;
+/** Upper bound for letting the confirming turn finish its reply before an Agent-approved restart. */
+const AGENT_APP_UPDATE_TURN_DRAIN_MS = 2 * 60 * 1000;
 /** Prepared Bot runtime records waiting for the matching Maker startup result. */
 const pendingBotRuntimeSnapshots = new Map<string, BotProfileRuntimeSnapshot>();
 // Maker copies start options for every runtime, including rebuilds of one task.
@@ -963,12 +974,14 @@ export function getMaker(): Maker {
               && entry?.source === 'builtin' && !REMOTE_ALLOWED_SERVER_NAMES.has(provider.name);
             return entry?.available === false || remoteBridgeMissing
               ? 'transport-unavailable-for-current-runtime' : null;
-          });
+          },
+          // The caller's own engine is the only evidence of what this task can call.
+          (server) => session.readMcpServerTools(server));
         if (_maker?.getSession(session.id) !== session) return { ok: false, errorCode: 'CALLER_UNAVAILABLE' };
         return { ...result, permission: session.stablePermissionModeState,
           hostCapabilities: Object.fromEntries(Object.entries(session.capabilities)
             .filter(([, value]) => value && typeof value === 'object' && 'supported' in value)),
-          hostCapabilitiesNote: '宿主支持的交互能力，不等于有同名 Agent 工具。Cindy 应用安装更新和重启须通过内置更新界面；check_app_update 仅检查更新。' };
+          hostCapabilitiesNote: '宿主支持的交互能力，不等于有同名 Agent 工具。安装 Cindy 更新须调用 install_app_update，由宿主向用户确认后经内置更新器完成；check_app_update 仅检查更新。' };
       },
       botCapabilities: createDesktopBotCapabilityService(),
       createMediaDownloadContext: (sessionId: string, sessionInstanceId: string) => {
@@ -1009,6 +1022,16 @@ export function getMaker(): Maker {
         return Boolean(session && session.instanceId === sessionInstanceId
           && session.getStatus() === 'active' && !isAppSessionBoundaryPending());
       },
+      askUserQuestionAsync: (
+        context: import('@cindy/mcps').LiziMcpSessionContext,
+        questions: Parameters<import('@cindy/maker-core').Session['askUserQuestionAsync']>[0],
+      ) => {
+        const session = context.sessionId ? _maker?.getSession(context.sessionId) : undefined;
+        if (!session || session.instanceId !== context.sessionInstanceId || isAppSessionBoundaryPending()) {
+          throw new Error('Question caller is no longer active');
+        }
+        return session.askUserQuestionAsync(questions);
+      },
       // 只读活跃 Session 的运行时真相。权限切换是 runtime-first、DB-second，
       // 因此插件过户自动放行不得回退 sessions.permission_mode；会话不再 active
       // 时同样 fail closed。闭包在 MCP tool-call 时执行，此时 _maker 已装配完成。
@@ -1040,6 +1063,37 @@ export function getMaker(): Maker {
           requestHostInteraction(session, request, bounded));
       },
     };
+    // Agent app update: live-session facts for owner-only confirmation cards.
+    const liveLocalSession = (sessionId: string, sessionInstanceId: string) => {
+      const session = _maker?.getSession(sessionId);
+      return session && session.instanceId === sessionInstanceId && session.getStatus() === 'active'
+        && !session.remoteHostId ? session : null;
+    };
+    setAgentAppUpdateSessionHost({
+      resolveCaller: ({ sessionId, sessionInstanceId }) => {
+        const session = liveLocalSession(sessionId, sessionInstanceId);
+        if (!session || isAppSessionBoundaryPending()) return 'unavailable';
+        return isAppUpdateOwnerTurn({
+          turnRunning: session.isTurnRunning(),
+          turnOrigin: session.getCurrentTurnOrigin(),
+          route: getActiveInteractionRoute(session),
+          ownerAuthoredInput: () => isActiveInputOwnerAuthored(sessionId),
+        }) ? 'owner' : 'not-owner';
+      },
+      countOtherRunningTasks: (callerSessionId) => (_maker?.listActiveSessions() ?? [])
+        .filter((session) => session.id !== callerSessionId
+          && (isSessionInTurn(session.id) || session.isTurnRunning())).length,
+      requestHostPermission: makerMemoryProviderDeps.requestHostPermission,
+      // Let the confirming turn deliver its reply first; never block the restart longer than the bound.
+      waitForCallerTurnToEnd: async ({ sessionId, sessionInstanceId }) => {
+        const deadline = Date.now() + AGENT_APP_UPDATE_TURN_DRAIN_MS;
+        while (Date.now() < deadline) {
+          const session = liveLocalSession(sessionId, sessionInstanceId);
+          if (!session || (!session.isTurnRunning() && !isSessionInTurn(sessionId))) return;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      },
+    });
     const orcaTeamStoreAdapter = createDesktopOrcaTeamStoreAdapter({
       getWorkerLink,
       updateWorkerStatus,
@@ -1545,13 +1599,10 @@ export function getMaker(): Maker {
       providerId?: string;
       credentialMode?: 'oauth-bearer' | 'gateway-key' | 'provider-oauth';
       hostPurpose?: 'control-plane' | 'review' | 'custom-context';
+      deviceHostedGuestProviderId?: string;
     }): Promise<string> => {
       const settings = readSubagentModelSettings();
-      if (
-        ctx.hostPurpose === 'control-plane'
-        || ctx.hostPurpose === 'review'
-        || !settings.codexSmartSubagentRouting
-      ) return 'default';
+      if (!codexHostUsesSmartSubagentRouting(settings, ctx)) return 'default';
       const providerViews: ProviderView[] =
         await getDesktopProviderService().listProviders({ allowSideEffects: false });
       const candidates = selectCodexSmartSubagentCandidates(providerViews, {
@@ -1737,6 +1788,14 @@ export function getMaker(): Maker {
         const usesScopedProxy = needsContextScope || !!accountProxyKey;
         const scopedProxyKey = accountProxyKey || customContextHostKey;
         const usesIsolatedProxy = isControlPlane || isReview || usesScopedProxy;
+        // 供应商分享受邀者的任务：独占的 proxy 只登记分享的那个供应商的路由并过受邀者守门，
+        // 不开智能子代理调配。没有独占 proxy 就不能安全地收窄，直接失败。
+        const guestProviderId = ctx.deviceHostedGuestProviderId?.trim() || undefined;
+        if (ctx.deviceHostedGuestProviderId !== undefined && (!guestProviderId || !usesScopedProxy)) {
+          const error = new Error('shared-provider Codex host requires its own scoped proxy');
+          (error as { codexSpawnConfigFatal?: boolean }).codexSpawnConfigFatal = true;
+          throw error;
+        }
         const effectiveCodexHome = ctx.codexHome ?? getCodexHome();
         let mcpExtraArgs: string[] = [];
         let mcpExtraEnv: Record<string, string> = {};
@@ -1810,7 +1869,7 @@ export function getMaker(): Maker {
         setCodexSubagentOAuthReader(getChatgptBridgeAuthForDispatch);
 
         const customContextProviderRoutes = usesScopedProxy
-          ? deriveCodexCustomProviderRoutes(getActiveCatalog())
+          ? restrictCodexRoutesToGuestProvider(deriveCodexCustomProviderRoutes(getActiveCatalog()), guestProviderId)
           : [];
 
         // 这个点在 CodexAgent.createHost() 内。返回的 codexProxyActive 会被冻到 AppServerHost 实例上,
@@ -1820,7 +1879,15 @@ export function getMaker(): Maker {
             scopedProxyKey,
             authInjection,
             customContextProviderRoutes,
+            guestProviderId,
           );
+          // 受邀者不走「proxy 不可用时直连网关」的退路：那条路不经受邀者守门。
+          if (guestProviderId && !isCodexCustomContextProxyHandleReady(scopedProxyKey)) {
+            await releaseCodexCustomContextProxy(scopedProxyKey);
+            const error = new Error('shared-provider Codex host requires the local proxy, but the proxy is not ready');
+            (error as { codexSpawnConfigFatal?: boolean }).codexSpawnConfigFatal = true;
+            throw error;
+          }
         } else if (usesIsolatedProxy) {
           await ensureCodexControlPlaneProxyReady(authInjection);
         } else {
@@ -1868,12 +1935,7 @@ export function getMaker(): Maker {
         );
         const storedSubagentModelSettings = readSubagentModelSettings();
         let smartSubagentConfig: CodexSmartSubagentConfig | undefined;
-        if (
-          !isControlPlane
-          && !isReview
-          && ready
-          && storedSubagentModelSettings.codexSmartSubagentRouting
-        ) {
+        if (ready && codexHostUsesSmartSubagentRouting(storedSubagentModelSettings, ctx)) {
           try {
             const providerViews: ProviderView[] =
               await getDesktopProviderService().listProviders({ allowSideEffects: false });
@@ -2690,6 +2752,15 @@ export function getMaker(): Maker {
           maxPages: lastPage,
           maxInputBytes: REMOTE_AGENT_PDF_MAX_BYTES,
         }),
+        // 供应商组分配到那台的任务：告诉那台直接运行，不再进入它自己的组(provider-groups.md §4 防转圈)。
+        isGroupAssigned: (sessionId) => readProviderGroupBinding(sessionId) !== null,
+        // 分享来的供应商被分享者建成了组：那台出问题时对方发来「需要换一台」，本机交接后带回凭证(§6.1)。
+        groupSwitch: getProviderGroupGuestSwitch(),
+        // 供应商分享的受邀者任务：WebFetch 用本机网络抓取(系统代理、单跳、内网要本机批准)。
+        isSharedProviderDevice: (deviceId) => parseProviderShareAgentDeviceId(deviceId) !== null,
+        webFetch: guardedOutboundFetch,
+        // 受邀者任务读写凭证类文件时，本机确认卡上的说明(provider-sharing.md §9 第 7 条)。
+        sharedProviderCredentialNotice: () => t('newChat.sharedProviderCredential.description'),
         logger: desktopMakerLogger,
       }),
       makerMemory: makerMemoryManager,

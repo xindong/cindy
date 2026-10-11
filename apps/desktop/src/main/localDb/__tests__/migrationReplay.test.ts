@@ -103,6 +103,28 @@ function columnNames(db: Database.Database, tableName: string): string[] {
 }
 
 describeMigrationReplay('migration replay', () => {
+  it.each(['missing', 'legacy', 'partial'])('replays remote report persistence with %s Worker schema', (shape) => {
+    const { db, cleanup } = createTempDb();
+    const stagedDir = mkdtempSync(path.join(tmpdir(), 'xdmaker-remote-report-migration-'));
+    try {
+      db.exec("CREATE TABLE migration_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE migration_history (seq INTEGER PRIMARY KEY, file_name TEXT NOT NULL, content_hash TEXT NOT NULL, applied_at INTEGER NOT NULL)");
+      if (shape !== 'missing') db.exec(`CREATE TABLE orca_workers (id TEXT PRIMARY KEY${shape === 'partial' ? ', pending_remote_report TEXT' : ''}); INSERT INTO orca_workers (id) VALUES ('worker-1');`);
+      const migration = listMigrations(drizzleDir()).find((item) => item.seq === 125)!;
+      copyFileSync(migration.sqlPath, path.join(stagedDir, migration.fileName));
+      mkdirSync(path.join(stagedDir, 'scripts'));
+      copyFileSync(migration.tsScriptPath!, path.join(stagedDir, 'scripts', path.basename(migration.tsScriptPath!)));
+      const result = runMigrationReplay(db, { drizzleDir: stagedDir, currentVersion: 124 });
+      expect(result.applied.map((migration) => migration.seq)).toEqual([125]);
+      expect(tableExists(db, 'orca_remote_opens')).toBe(true);
+      if (shape !== 'missing') {
+        expect(columnNames(db, 'orca_workers')).toEqual(expect.arrayContaining(['pending_remote_report', 'remote_stop_confirmed_at']));
+        expect(db.prepare('SELECT id FROM orca_workers').all()).toEqual([{ id: 'worker-1' }]);
+      }
+    } finally {
+      rmSync(stagedDir, { recursive: true, force: true });
+      cleanup();
+    }
+  });
   it('commits the complete fresh schema and task presets in one outer transaction', () => {
     const { db, cleanup } = createTempDb();
     try {

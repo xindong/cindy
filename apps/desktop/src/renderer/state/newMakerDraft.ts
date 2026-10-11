@@ -83,6 +83,18 @@ export interface CollabWorkerConfig {
   initialTask?: string;
   /** 当前协同 Team 后续新 Worker 共用的默认权限。 */
   workerPermissionMode?: OrcaWorkerPermissionMode;
+  /**
+   * 首个 Worker 的运行设备与那台上的目录。与 initialTask 一样不跨重启持久化：设备在线与
+   * 版本随时会变，重启后回到这台电脑，由用户重新选择。
+   */
+  executionDeviceId?: string;
+  executionWorkingDir?: string;
+  /**
+   * 首个 Worker 的 Agent 所在电脑(远程供应商)：string = 那台电脑或分享，null = 任务所在电脑，
+   * 缺省 = 跟 Lead。模型与来源是按这个位置的目录选的；与草稿自己的 agentDeviceId 一样不跨重启
+   * 保留，带着它的整份配置在加载时丢弃(只丢位置会让模型落到别的目录上)。
+   */
+  agentDeviceId?: string | null;
 }
 
 export interface CollabDraft {
@@ -107,9 +119,10 @@ export interface NewMakerDraft {
   /** device-link 目标设备友好名(草稿页横幅展示),与 deviceLinkDeviceId 同源。 */
   deviceLinkDeviceName: string | null;
   /**
-   * Agent 在同账号另一台电脑上运行(任务、项目文件与命令仍在本机):那台电脑的 deviceId。
-   * 模型目录、Agent 登录与供应商都来自那台。与 remoteHostId / deviceLinkDeviceId 互斥;
-   * 与 deviceLinkDeviceId 同理**不跨重启持久化**(绑的是一台可能离线的活动设备)。
+   * Agent 在同账号另一台电脑上运行(任务、项目文件与命令仍在任务所在电脑:本机,或 deviceLinkDeviceId
+   * 那台被控电脑):运行 Agent 的那台电脑的 deviceId。模型目录、Agent 登录与供应商都来自那台。
+   * 与 remoteHostId 互斥;换任务所在电脑即清空。与 deviceLinkDeviceId 同理**不跨重启持久化**
+   * (绑的是一台可能离线的活动设备)。
    */
   agentDeviceId: string | null;
   /** agentDeviceId 那台电脑的友好名(展示用)。 */
@@ -328,6 +341,8 @@ function sanitize(raw: unknown): NewMakerDraft {
   const workerConfig: CollabWorkerConfig | undefined = (() => {
     const wc = collabRaw?.workerConfig;
     if (!wc || typeof wc !== 'object') return undefined;
+    // 按另一台电脑(远程供应商)目录选的配置不跨重启保留，见 CollabWorkerConfig.agentDeviceId。
+    if (typeof wc.agentDeviceId === 'string') return undefined;
     const model = typeof wc.model === 'string' && wc.model.trim() ? wc.model : undefined;
     if (!model) return undefined;
     const role = typeof wc.role === 'string' && wc.role.trim() ? wc.role.trim() : 'developer';
@@ -855,8 +870,10 @@ export function patchDraft(patch: Partial<NewMakerDraft>): void {
     next.deviceLinkDeviceId = null;
     next.deviceLinkDeviceName = null;
   }
-  // 「Agent 在另一台电脑运行」只用于本机任务：任务本身建到远程设备或 SSH 主机时不成立。
-  if (next.deviceLinkDeviceId != null || next.remoteHostId != null) {
+  // 「Agent 在另一台电脑运行」：本机任务，或远程控制下建到被控电脑的任务(被控电脑是否支持由草稿页
+  // 判定)。任务建到 SSH 主机时不成立；换了任务所在电脑(本机 ↔ 被控电脑、被控电脑之间)时上一台的
+  // 选择不再适用，除非同一个 patch 显式给了新值。运行 Agent 的电脑不能就是任务所在电脑。
+  if (next.remoteHostId != null) {
     next.agentDeviceId = null;
     next.agentDeviceName = null;
   } else if ('agentDeviceId' in normalizedPatch) {
@@ -864,6 +881,13 @@ export function patchDraft(patch: Partial<NewMakerDraft>): void {
     next.agentDeviceId =
       typeof agentDeviceId === 'string' && agentDeviceId.trim().length > 0 ? agentDeviceId.trim() : null;
     if (next.agentDeviceId == null) next.agentDeviceName = null;
+  } else if (currentDraft.deviceLinkDeviceId !== next.deviceLinkDeviceId) {
+    next.agentDeviceId = null;
+    next.agentDeviceName = null;
+  }
+  if (next.agentDeviceId != null && next.agentDeviceId === next.deviceLinkDeviceId) {
+    next.agentDeviceId = null;
+    next.agentDeviceName = null;
   }
   // 换目标设备(含本机 ↔ 被控设备、被控设备 A ↔ B)→ 丢掉 Worker 富配置,只留
   // enabled + worker。model / providerId / effort / fast 都是**设备作用域**的:被控端

@@ -32,6 +32,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { app } from 'electron';
+import { materializeTaskImageTextResult } from '../cindy-media/taskImageDelivery';
+import { rewriteTaskImageReferences } from '../cindy-media/taskImageMarkdown';
 import { stripInternalWebCitations } from '@cindy/maker-shared/internal-citation';
 import { MAIN_OWNED_SEND_CONTEXT } from '@cindy/maker-core';
 
@@ -116,6 +118,7 @@ import {
   type ChannelSessionRoute,
 } from '../im/shared/openChannelSession.js';
 import { describeInteractionSource } from '../im/shared/interactionSource';
+import { hookAutoReviewReferences } from '../im/shared/autoReviewReferences.js';
 import { groupLaneOf } from './groupWindow';
 
 import type {
@@ -446,6 +449,7 @@ function turnTextsFor(observer: HookTurnObserver): HookTurnTexts {
  * 贴在被折叠工作过程里的图和文件会随着正文投影一起被丢掉(PR #1272 review)。
  */
 async function collectOutboundForFinalText(
+  sessionId: string,
   texts: HookTurnTexts,
   extraImageAbsPaths: string[],
   allowedFileRoots: string[],
@@ -454,14 +458,26 @@ async function collectOutboundForFinalText(
   // Defense in depth for X/Slack/Telegram: live Codex traffic is normalized in
   // maker-core, but older persisted/continuation text and future adapters must
   // never forward private Web citation delimiters to an external channel.
-  const publicText = stripInternalWebCitations(texts.publicText);
-  const wholeTurn = stripInternalWebCitations(texts.wholeTurn);
+  // Remote runtimes do not grant access to this host's files or media cache.
+  // Still run the shared caption/warning projection without granting local IO.
+  const canReadLocal = allowedFileRoots.length > 0;
+  // The public projection is drawn from this whole turn. Import its image URLs
+  // once so a temporary source changing cannot split the body from its attachment.
+  const scanText = stripInternalWebCitations(texts.wholeTurn);
+  const materialized = canReadLocal
+    ? await materializeTaskImageTextResult(sessionId, scanText)
+    : { text: scanText, replacements: new Map<string, string>() };
+  const wholeTurn = materialized.text;
+  const publicText = texts.wholeTurn === texts.publicText ? wholeTurn
+    : rewriteTaskImageReferences(stripInternalWebCitations(texts.publicText), materialized.replacements);
   if (!hasOutboundRefs(wholeTurn) && extraImageAbsPaths.length === 0) {
     return { finalText: publicText };
   }
   try {
-    const collected = await collectOutboundAttachments(publicText, extraImageAbsPaths, {
-      resolveImageUrl: resolveRenderableImageUrl,
+    const collected = await collectOutboundAttachments(publicText, canReadLocal ? extraImageAbsPaths : [], {
+      resolveImageUrl: canReadLocal ? resolveRenderableImageUrl : () => {
+        throw new Error('Remote media is not available on this host');
+      },
       allowedFileRoots,
       ...(wholeTurn !== publicText ? { refScanText: wholeTurn } : {}),
       log,
@@ -966,15 +982,19 @@ export function createMakerHookSessionRunner(deps: {
       // 就会让"续跑接回渠道"那条路径静默落后于本路径。
       // tool_result 旁路收集的出站图片 absPath(收口时随 turn.end 附件外发)
       const extraImageAbsPaths: string[] = [];
+      const allowedFileRoots = session.remoteHostId ? [] : [workingDir];
       const useTelegramProgressParity = req.source?.im === 'telegram';
       const observer = observeHookTurn(session, {
+        onTurnTerminal: req.onTurnTerminal,
         // Telegram 对齐个人 bot：过程消息累积展示整轮正文，done 先冲刷最后一帧。
         // Slack / X 保留只展示当前消息的旧行为，避免顺带改变其它车道。
         ...(req.onProgress ? { onProgress: req.onProgress } : {}),
         ...(useTelegramProgressParity
           ? { progressBodyMode: 'whole' as const, flushProgressOnDone: true }
           : {}),
-        onToolResult: (fullText) => collectOutboundImages(fullText, extraImageAbsPaths, log),
+        onToolResult: (fullText) => {
+          if (allowedFileRoots.length > 0) collectOutboundImages(fullText, extraImageAbsPaths, log);
+        },
         onSilentStopSettled,
         log,
       });
@@ -1202,10 +1222,11 @@ export function createMakerHookSessionRunner(deps: {
         : sendContentBase;
       // 落库形态: 有附件用 {text, images, files} 对象(createMessage safeStringify
       // 存 JSON, 读回 parseUserContent 提取 images/files); 无附件纯文本 string。
+      const userText = req.userText ?? req.source?.userText ?? req.prompt;
       const userMessageContent =
         imageRefs.length > 0 || fileRefs.length > 0
-          ? { text: req.prompt, images: imageRefs, files: fileRefs }
-          : req.prompt;
+          ? { text: userText, images: imageRefs, files: fileRefs }
+          : userText;
 
       const turnChangeAnchorClientId = randomUUID();
       let turnChangeSetStarted = false;
@@ -1243,6 +1264,14 @@ export function createMakerHookSessionRunner(deps: {
         // 派发(下面的 catch 统一收尾并回失败), 不让迟到的 send 在 teardown 之后重新启动
         // 旧账号的请求。
         assertAccount?.();
+        // Same projection as personal IM: the server-stamped reply target (captured before
+        // display bounding) and the attachments actually delivered, never parsed from the prompt.
+        const autoReviewReferences = trustedChannelOrigin
+          ? hookAutoReviewReferences(req.autoReviewReplyTarget, {
+              images: imageRefs.length,
+              files: fileRefs.length,
+            })
+          : undefined;
         const sendResult = await session.send(outgoingMessage, {
           origin,
           planMode: false,
@@ -1255,7 +1284,8 @@ export function createMakerHookSessionRunner(deps: {
                   // clean channel message used for deterministic managed Pi
                   // package commands; only older servers that omit the field
                   // fall back to the decorated prompt.
-                  rawChannelText: req.source?.userText ?? req.prompt,
+                  rawChannelText: userText,
+                  ...(autoReviewReferences ? { autoReviewReferences } : {}),
                 },
               }
             : {}),
@@ -1291,7 +1321,7 @@ export function createMakerHookSessionRunner(deps: {
                 sourceDescription: describeInteractionSource({
                   channelName: req.source?.im ?? req.origin.connectionName,
                   chatId: req.source?.channelName ?? req.title ?? req.source?.im ?? 'IM',
-                  text: req.source?.userText ?? '',
+                  text: req.userText ?? req.source?.userText ?? '',
                   interactionSource: {
                     senderName: req.source?.threadContext?.find((message) =>
                       message.messageId === req.source?.triggerMessageId && !!message.messageId)?.author,
@@ -1336,6 +1366,7 @@ export function createMakerHookSessionRunner(deps: {
                   ? {
                       hookSource: {
                         ...req.source,
+                        ...(req.source.userText !== undefined ? { contentFormat: 'user-text' } : {}),
                         // New messages only persist producer-supplied context.
                         // Legacy prompt projection belongs to the read path.
                         contextSnapshot: req.contextSnapshot ?? {},
@@ -1395,12 +1426,12 @@ export function createMakerHookSessionRunner(deps: {
         await observer.finished;
       } catch (err) {
         observer.stop();
-        return fail(
-          err instanceof Error ? err.message : String(err),
-          observer.errorReason === 'output-limit'
-            ? stripInternalWebCitations(observer.finalText())
-            : '',
-        );
+        const collected = observer.errorReason === 'output-limit'
+          ? await collectOutboundForFinalText(
+            session.id, turnTextsFor(observer), extraImageAbsPaths, allowedFileRoots, log,
+          )
+          : { finalText: '' };
+        return { ...fail(err instanceof Error ? err.message : String(err)), ...collected };
       } finally {
         // 无论正常收口还是超时/错误,未决交互都按默认收口并释放中央 route
         finalizeInteractions();
@@ -1416,9 +1447,10 @@ export function createMakerHookSessionRunner(deps: {
       // 出站附件: 文本引用 / 旁路图存在时才收集(读盘 + base64 只在需要时
       // 发生); 收集失败不拖垮收口 —— 附件是回帖增强, 文本永远要发出去
       const collected = await collectOutboundForFinalText(
+        session.id,
         turnTextsFor(observer),
         extraImageAbsPaths,
-        [workingDir],
+        allowedFileRoots,
         log,
       );
       let finalText = collected.finalText;
@@ -1479,10 +1511,12 @@ function beginContinuationWatch(
   }
   const startedAt = Date.now();
   const extraImageAbsPaths: string[] = [];
+  const allowedFileRoots = session.remoteHostId ? [] : [session.workDir];
   let claimed = false;
   let settled = false;
   const useTelegramProgressParity = req.source?.im === 'telegram';
   const observer = observeHookTurn(session, {
+    onTurnTerminal: req.onSettling,
     // 与 run() 同一呈现；Telegram 续跑同样累计正文并在 done 冲刷最后一帧。
     onProgress: (text) => {
       // 认领之前不发进度: 那时 server 还没把这条消息挂到新 requestId 上。
@@ -1491,7 +1525,9 @@ function beginContinuationWatch(
     ...(useTelegramProgressParity
       ? { progressBodyMode: 'whole' as const, flushProgressOnDone: true }
       : {}),
-    onToolResult: (fullText) => collectOutboundImages(fullText, extraImageAbsPaths, log),
+    onToolResult: (fullText) => {
+      if (allowedFileRoots.length > 0) collectOutboundImages(fullText, extraImageAbsPaths, log);
+    },
     onSilentStopSettled,
     log,
   });
@@ -1515,13 +1551,11 @@ function beginContinuationWatch(
       req.onAbandon();
       return;
     }
-    if (errorMessage !== null) {
+    if (errorMessage !== null && observer.errorReason !== 'output-limit') {
       // 与 run() 一致：只有确定的输出上限失败携带已累计正文。
       req.onEnd({
         status: 'error',
-        finalText: observer.errorReason === 'output-limit'
-          ? stripInternalWebCitations(observer.finalText())
-          : '',
+        finalText: '',
         errorMessage,
         durationMs: Date.now() - startedAt,
       });
@@ -1531,15 +1565,16 @@ function beginContinuationWatch(
       // workDir 以 live session 为权威(会话可能被移动过), 与 run() 里
       // isDirAuthorized 用 session.workDir 复核同理。
       const collected = await collectOutboundForFinalText(
+        session.id,
         turnTextsFor(observer),
         extraImageAbsPaths,
-        [session.workDir],
+        allowedFileRoots,
         log,
       );
       req.onEnd({
-        status: 'ok',
+        status: errorMessage === null ? 'ok' : 'error',
         finalText: collected.finalText,
-        errorMessage: null,
+        errorMessage,
         durationMs: Date.now() - startedAt,
         ...(collected.attachments !== undefined ? { attachments: collected.attachments } : {}),
       });

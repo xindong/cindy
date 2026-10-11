@@ -13,6 +13,7 @@
 import type { AutoReviewUserIntent } from './agents/shared/auto-review-decision.js';
 import { randomUUID } from 'node:crypto';
 import { ToolLoopGuard } from './agents/shared/loop-guard.js';
+import { AsyncUserQuestions } from './agents/shared/async-user-questions.js';
 import {
   ToolLoopMonitor,
   type HardToolLoopVerdict,
@@ -44,6 +45,7 @@ import { NotSupportedError } from './types/capabilities.js';
 import type { VisionBridgeHook } from './types/vision-bridge.js';
 import type {
   AgentEvent,
+  AskUserQuestionItem,
   InteractionRequest,
   InteractionDecision,
   RewindCommitOptions,
@@ -56,6 +58,7 @@ import { isTerminalAgentErrorEvent, parseToolLoopErrorDetails, isTurnWatchdogLiv
 import type { ContextUsageData } from './types/context-usage.js';
 import type { PiRuntimeCapabilityManifest } from './types/pi-runtime-capabilities.js';
 import type {
+  AgentMcpServerToolsReport,
   AgentSessionHandle,
   PiModelSwitchPreview,
   AgentSessionTeardownOptions,
@@ -66,6 +69,7 @@ import type {
 } from './agents/base-agent.js';
 import {
   AUTO_REVIEW_SOURCE_CONTENT,
+  ASYNC_QUESTION_ANSWER,
   AUTO_REVIEW_USER_INTENT,
   TurnDispatchRejectedError,
   TurnDispatchUnconfirmedError,
@@ -177,6 +181,11 @@ export interface SessionOptions {
    * 是不可能存在于本地 fs 的, 没必要也不该 stat。
    */
   remoteHostId?: string | null;
+  /**
+   * 同账号另一台电脑（或 `share:` 分享来源）上运行 Agent 时的设备 id，与 remoteHostId 互斥。
+   * 主进程的发送边界用它判断供应商目录在对端：本机目录不能裁决这类会话的显式来源。
+   */
+  agentDeviceId?: string | null;
   /**
    * turn 零事件看门狗阈值(ms)。省略 = env / DEFAULT_TURN_STALL_MS；0 = 关闭。
    * 主要供测试注入短阈值，宿主正常不传。
@@ -426,6 +435,8 @@ export class Session {
   readonly capabilities: Capabilities;
   /** 见 SessionOptions.remoteHostId。 */
   readonly remoteHostId: string | null;
+  /** 见 SessionOptions.agentDeviceId。 */
+  readonly agentDeviceId: string | null;
 
   private readonly handle: AgentSessionHandle;
   private readonly logger: Logger;
@@ -532,6 +543,8 @@ export class Session {
   private turnStallSliceStartedAt = 0;
   /** 正在等用户回应的交互数；>0 期间不计 stall 额度（没事件是正常的）。 */
   private pendingInteractions = 0;
+  /** Blocking question cards take precedence over optional async cards. */
+  private pendingUserQuestions = 0;
   /** 最近一次 fan-out 事件的时刻，仅用于日志诊断。 */
   private lastEventAt = 0;
   /**
@@ -550,6 +563,7 @@ export class Session {
   private lastEventType: string | null = null;
   /** 优雅停止所需的 turn 控制事实；不承担 UI/MCP 会话状态投影。 */
   private turnControlState: TurnControlState | null = null;
+  private readonly asyncUserQuestions: AsyncUserQuestions;
 
   constructor(opts: SessionOptions) {
     this.hostStartupPreferences = opts.hostStartupPreferences
@@ -561,6 +575,7 @@ export class Session {
     this.handle = opts.handle;
     this.capabilities = opts.capabilities;
     this.remoteHostId = opts.remoteHostId ?? null;
+    this.agentDeviceId = opts.agentDeviceId ?? null;
     this.logger = opts.logger.child(`s:${this.id}`);
     this.permissionModeStateValue = {
       mode: opts.permissionMode ?? null,
@@ -570,6 +585,17 @@ export class Session {
       opts.turnStallMs ?? parseTurnStallMs(process.env.XDT_SESSION_TURN_STALL_MS);
     this.visionBridge = opts.visionBridge;
     this.toolLoopReviewer = opts.toolLoopReviewer;
+    this.asyncUserQuestions = new AsyncUserQuestions({
+      isActive: (generation) => this.status === 'active' && !this.terminationStarted
+        && generation === this.turnGeneration && this.handle.isTurnRunning?.() === true,
+      resolve: (request) => this.interactionListener!(request),
+      deliver: (text, signal) => this.steer(text, { signal, [ASYNC_QUESTION_ANSWER]: true }),
+      dismiss: (requestId, reason) => this.fanOutEvent({
+        type: 'interaction_dismissed', data: { requestId, reason, resolvedAs: 'deny' }, source: this.agentKind,
+      }),
+      reportError: () => this.fanOutEvent({ type: 'error', source: this.agentKind,
+        data: { message: 'Async question answer delivery failed.', isTerminal: false } }),
+    });
 
     // 注入 InteractionResolver 到底层 handle, 转发到 host 维护的 listener。
     // 没接 listener 时按 kind 给出安全默认: 都视作 deny(host 必须接 listener 才能交互)。
@@ -1143,6 +1169,7 @@ export class Session {
   async abort(): Promise<void> {
     if (this.status === 'closed') return;
     if (this.status === 'error') return;
+    this.asyncUserQuestions.expire('session_aborted');
     const abortGeneration = this.turnGeneration;
     this.cancelSendReservation(this.sendReservation);
     // 中断已在进行:不再计 stall 额度(下一个 turn 的 send 会重新起表)。
@@ -1195,6 +1222,7 @@ export class Session {
   }
 
   async requestGracefulStop(): Promise<SessionGracefulStopResult> {
+    this.asyncUserQuestions.expire('session_stopping');
     const reservation = this.sendReservation;
     if (reservation) return this.requestGracefulStopForReservation(reservation);
     const control = this.turnControlState;
@@ -1372,6 +1400,7 @@ export class Session {
     if (this.status === 'closed') return Promise.resolve();
 
     this.terminationStarted = true;
+    this.asyncUserQuestions.expire('session_closed');
     // 拆除开始即作废进行中的工具循环复核,迟到结论不得再中断。
     this.turnControlState?.toolLoopMonitor?.dispose();
     // Reserve before synchronous terminal listeners run, but begin transport
@@ -1522,6 +1551,7 @@ export class Session {
     const teardown: AgentSessionTeardownOptions = opts ?? { reason: 'account-boundary' };
     if (this.status === 'closed') return;
     this.terminationStarted = true;
+    this.asyncUserQuestions.expire('session_closed');
     // 拆除开始即作废进行中的工具循环复核,迟到结论不得再中断。
     this.turnControlState?.toolLoopMonitor?.dispose();
     // 与 performClose() 对齐：进入拆离立即 abort 未完成的 pre-dispatch reservation
@@ -1588,6 +1618,15 @@ export class Session {
       throw new NotSupportedError('contextUsage', { supported: false, reason: 'not-implemented' });
     }
     return this.handle.getContextUsage();
+  }
+
+  /**
+   * The engine's own view of one MCP server in this session. Null when the
+   * engine has no per-session MCP status entry; never starts or calls a server.
+   */
+  async readMcpServerTools(serverName: string): Promise<AgentMcpServerToolsReport | null> {
+    this.ensureActive();
+    return await this.handle.readMcpServerTools?.(serverName) ?? null;
   }
 
   /**
@@ -2067,6 +2106,11 @@ export class Session {
     return this.handle.getCurrentTurnId?.() ?? null;
   }
 
+  /** Product origin of the dispatched turn; Host owner-only actions refuse automated turns. */
+  getCurrentTurnOrigin(): SendOrigin | null {
+    return this.currentTurnOrigin;
+  }
+
   /**
    * dryRun: 问 SDK 这次 rewind 会动哪些文件。返回 RewindFilesResult 给 UI 显示 diff。
    * SDK 软拒绝 (老 session 无 checkpointing) 包成 {canRewind:false, error}, 业务可继续。
@@ -2139,12 +2183,21 @@ export class Session {
     request: InteractionRequest,
     resolve: () => Promise<InteractionDecision>,
   ): Promise<InteractionDecision> {
+    // Native async questions use the same card resolver, but never suspend turn
+    // protection or register a waiting interaction with the lifecycle observer.
+    if (request.kind === 'ask_user_question' && request.delivery === 'async') return resolve();
+    const isQuestion = request.kind === 'ask_user_question';
+    if (isQuestion) {
+      this.pendingUserQuestions += 1;
+      this.asyncUserQuestions.expire('superseded');
+    }
     this.pendingInteractions += 1;
     const runtime = this.observeInteractionStarted(request);
     this.armTurnStallWatchdog();
     try {
       return await resolve();
     } finally {
+      if (isQuestion) this.pendingUserQuestions -= 1;
       this.pendingInteractions = Math.max(0, this.pendingInteractions - 1);
       this.observeInteractionSettled(runtime);
       this.armTurnStallWatchdog();
@@ -2153,6 +2206,20 @@ export class Session {
 
   setInteractionListener(listener: InteractionRequestListener | null): void {
     this.interactionListener = listener;
+  }
+
+  /** Display an optional question and return immediately; answers steer only this execution. */
+  askUserQuestionAsync(questions: AskUserQuestionItem[]): string {
+    // Use the live Session identity, even if a stale MCP context claims another
+    // harness. Codex's native adapter is its sole async question owner.
+    if (this.agentKind === 'codex') throw new Error('Codex uses native async questions');
+    this.ensureActive();
+    if (!this.interactionListener) throw new Error('Question UI is unavailable');
+    if (this.pendingUserQuestions > 0) throw new Error('A blocking user question is already pending');
+    if (!this.capabilities.sameTurnSteer.supported) {
+      throw new NotSupportedError('sameTurnSteer', this.capabilities.sameTurnSteer);
+    }
+    return this.asyncUserQuestions.ask(questions, this.turnGeneration);
   }
 
   setTurnLifecycleObserver(observer: SessionTurnLifecycleObserver | null): void {
@@ -2189,6 +2256,7 @@ export class Session {
   }
 
   private beginTurnControl(generation: number): void {
+    this.asyncUserQuestions.expire('superseded');
     this.turnControlState?.toolLoopMonitor?.dispose();
     this.turnControlState = {
       generation,
@@ -2630,6 +2698,9 @@ export class Session {
     const hasPendingContinuation = continuationState !== null;
     const isTerminal =
       (event.type === 'done' && !hasPendingContinuation) || isTerminalAgentErrorEvent(event);
+    if (isTerminal && !isBackgroundEvent) {
+      this.asyncUserQuestions.expire(event.type === 'error' ? 'turn_failed' : 'turn_completed', resolvedGeneration);
+    }
     // A dispatching send is not enough evidence that a terminal event belongs
     // to it: Codex can enqueue the previous turn's terminal error after flipping
     // its handle idle. Only runEventLoop's generation adoption may transfer

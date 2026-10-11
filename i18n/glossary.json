@@ -2461,6 +2461,84 @@
       "note": "共享任务加入表单中由房主提供、访客输入的代码；用户要求明确称为邀请码，避免被理解为任意邀请文本。"
     },
     {
+      "id": "provider-sharing",
+      "status": "proposed",
+      "en": "Provider Sharing",
+      "translations": {
+        "zh-CN": "供应商分享",
+        "zh-TW": "供應商分享",
+        "ja": "プロバイダー共有",
+        "ko": "제공자 공유"
+      },
+      "checkCase": false,
+      "note": "把自己电脑上的某个供应商分享给其他 Cindy 账号使用(docs/product-rules/provider-sharing.md)。中文一律用「分享」，不用「共享」——「共享」留给共享任务，两者是独立的授权关系；ja / ko 两个功能都自然译作「共有 / 공유」，靠「プロバイダー / 제공자」与「セッション / 세션」区分。界面上「管理分享」「分享 {供应商}」「分享给我的供应商」都属于本词。"
+    },
+    {
+      "id": "share-link",
+      "status": "proposed",
+      "en": "Share Link",
+      "translations": {
+        "zh-CN": "分享链接",
+        "zh-TW": "分享連結",
+        "ja": "共有リンク",
+        "ko": "공유 링크"
+      },
+      "checkCase": false,
+      "note": "供应商分享的一次性链接：生成后 5 分钟内有效、只能使用一次。与共享任务的「邀请链接 / 邀请码」是不同的东西，不要混用。"
+    },
+    {
+      "id": "share-request",
+      "status": "proposed",
+      "en": "Share Request",
+      "translations": {
+        "zh-CN": "分享申请",
+        "zh-TW": "分享申請",
+        "ja": "共有の申請",
+        "ko": "공유 요청"
+      },
+      "checkCase": false,
+      "note": "受邀者打开分享链接、确认后发给分享者的请求；分享者「同意分享 / 拒绝申请」。受邀者可以「撤回申请」。"
+    },
+    {
+      "id": "provider-group",
+      "status": "proposed",
+      "en": "Provider Group",
+      "translations": {
+        "zh-CN": "供应商组",
+        "zh-TW": "供應商組",
+        "ja": "プロバイダーグループ",
+        "ko": "제공자 그룹"
+      },
+      "checkCase": false,
+      "note": "某台电脑上某个供应商的一组运行位置：本机、我的其他电脑、通过分享链接加入的电脑（docs/product-rules/provider-groups.md）。这个供应商的使用都按组策略选一台组内电脑运行 Agent。中文用「供应商组」，不单用「分组」，避免与模型列表和设置页的模型分组混淆；组里的电脑称「组内电脑」。"
+    },
+    {
+      "id": "group-strategy",
+      "status": "proposed",
+      "en": "Group Strategy",
+      "translations": {
+        "zh-CN": "组策略",
+        "zh-TW": "組策略",
+        "ja": "グループの割り当て方式",
+        "ko": "그룹 배정 방식"
+      },
+      "checkCase": false,
+      "note": "供应商组为新任务选择组内电脑的规则：最少占用、轮询、按顺序、按权重。只决定新任务分到哪台，已开始的任务不迁移。"
+    },
+    {
+      "id": "pairing-code",
+      "status": "proposed",
+      "en": "Pairing Code",
+      "translations": {
+        "zh-CN": "配对码",
+        "zh-TW": "配對碼",
+        "ja": "ペアリングコード",
+        "ko": "페어링 코드"
+      },
+      "checkCase": false,
+      "note": "供应商分享申请的 4 位数字，只在受邀者「等待同意」界面与分享者审批弹窗 / 管理页待处理一栏出现，供双方核对是同一个人；不是密钥，不参与鉴权。与 OAuth 的 Device Code（设备码）是不同概念。"
+    },
+    {
       "id": "bot-workbench",
       "status": "proposed",
       "en": "Workbench",
@@ -2483,6 +2561,19 @@
         "ko": "목표｜요약"
       },
       "note": "会话自动命名风格的一种结构化标题格式：短目标 + 全角竖线 + 摘要。仅用于任务标题命名风格，不泛化到普通摘要功能。先登记为 proposed，待 UI 走查后再定。"
+    },
+    {
+      "id": "teammate-todo",
+      "status": "proposed",
+      "en": "Todo",
+      "translations": {
+        "zh-CN": "待办",
+        "zh-TW": "待辦",
+        "ja": "Todo",
+        "ko": "할 일"
+      },
+      "checkCase": false,
+      "note": "伙伴独立事务清单，含交办与获准信息中的主动发现；项目、执行任务与PR仅可选关联。不替代Session任务生命周期。"
     }
   ]
 }

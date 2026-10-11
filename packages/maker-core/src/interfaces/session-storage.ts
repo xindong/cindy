@@ -17,6 +17,8 @@ export interface SessionMeta {
   effort?: Effort;
   permissionMode?: PermissionMode;
   fastMode?: boolean;
+  /** Initial plan selection, persisted with the task rather than after creation. */
+  planMode?: boolean;
   /** Persist the host-owned Review purpose atomically with session creation. */
   reviewMode?: true;
   createdAt: number;

@@ -5,6 +5,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { handleSessionEvent, type SessionEventDependencies } from '../sessionEventPipeline.js';
 import { setMainLocale } from '../../i18n.js';
 import { installSessionTurnObserver } from '../sessionTurnObserver.js';
+import { onChannelTurn } from '../channelTurnSignal.js';
 import { createSessionBindingLifecycle } from '../sessionBindingLifecycle.js';
 import { SessionTurnActivityTracker } from '../sessionTurnActivityTracker.js';
 import { ProductTurnWallClockTracker, ProductTurnUsageTargetTracker } from '../turnWallClock.js';
@@ -303,12 +304,14 @@ function harness() {
     agentInputCoordinatorHolder: {
       getActiveInputClientId: vi.fn((): string | null => null),
       getActiveInputClientIds: vi.fn((): string[] => []),
+      isActiveTaskCoordination: vi.fn(() => false),
       getQueueControlSnapshot: vi.fn(() => ({ pendingQueue: [] as unknown[] })),
       onTurnEvent: vi.fn(),
       noteSuppressedTerminalError: vi.fn(),
       onExternalTurnSettled: vi.fn(),
       isAutoResumePending: vi.fn(() => false),
       isAutoResumeDeferred: vi.fn(() => false),
+      getProviderGroupSwitchHoldId: vi.fn((): number | null => null),
       getAutoResumeAttemptToken: vi.fn(() => 5),
       getAutoResumeDeferredOwner: vi.fn(() => null),
     },
@@ -399,6 +402,49 @@ function ordered(...names: string[]) {
 }
 
 describe('production Session event pipeline', () => {
+  it('delivers coordination actions without public prose, then preserves ordinary and completion replies', async () => {
+    const h = harness();
+    h.deps.agentInputCoordinatorHolder.isActiveTaskCoordination.mockReturnValue(true);
+    h.deps.agentInputCoordinatorHolder.getActiveInputClientId.mockReturnValue('coordination');
+    try {
+      h.emit(event('text', { text: 'Internal file ownership agreement', isFinal: true }));
+      h.emit(event('text', { text: 'Internal standalone' }, { standaloneText: true }));
+      h.emit(event('thinking', { text: 'Internal reasoning' }));
+      expect(effects.fn('onAssistantTextEvent')).not.toHaveBeenCalled();
+      expect(effects.fn('onStandaloneTextEvent')).not.toHaveBeenCalled();
+      expect(h.deps.broadcastToAllWindows).not.toHaveBeenCalled();
+      h.emit(event('tool_use', { id: 'tool', name: 'read', input: {} }));
+      expect(effects.fn('onToolUseEvent')).toHaveBeenCalledOnce();
+      h.deps.agentInputCoordinatorHolder.onTurnEvent.mockImplementation(() => {
+        h.deps.agentInputCoordinatorHolder.isActiveTaskCoordination.mockReturnValue(false);
+      });
+      h.emit(event('done', { result: 'Internal acknowledgement', finalText: 'Internal acknowledgement' }));
+      expect(h.deps.broadcastToAllWindows).toHaveBeenCalledWith('maker:event', expect.objectContaining({
+        event: expect.objectContaining({ type: 'done', data: expect.objectContaining({ result: '', finalText: '' }),
+          agentMeta: expect.objectContaining({ botPrivateReply: true, botTaskCoordination: true }) }),
+      }));
+      expect(JSON.stringify(h.deps.broadcastToAllWindows.mock.calls)).not.toContain('Internal acknowledgement');
+      h.deps.agentInputCoordinatorHolder.getActiveInputClientId.mockReturnValue('bot-delegation-completion:result');
+      h.emit(event('text', { text: 'User requested final result', isFinal: true }));
+      expect(effects.fn('onAssistantTextEvent')).toHaveBeenCalledOnce();
+    } finally { await h.dispose(); }
+  });
+
+  it('keeps terminal failures and runtime recovery notices visible during coordination', async () => {
+    const h = harness();
+    h.deps.redactEventForRenderer.mockImplementation(value => value);
+    h.deps.agentInputCoordinatorHolder.isActiveTaskCoordination.mockReturnValue(true);
+    h.deps.agentInputCoordinatorHolder.getActiveInputClientId.mockReturnValue('coordination');
+    try {
+      h.emit(event('error', { message: 'User action required' }));
+      expect(h.deps.broadcastToAllWindows).toHaveBeenCalledWith('maker:event', expect.objectContaining({
+        event: expect.objectContaining({ type: 'error', data: expect.objectContaining({ message: 'User action required' }) }),
+      }));
+      h.emit(event('text', { text: 'Recovery requires attention' }, { runtimeRecovery: true }));
+      expect(effects.fn('onAssistantTextEvent')).toHaveBeenCalledOnce();
+    } finally { await h.dispose(); }
+  });
+
   it('suppresses scheduled content before persistence and delivery while preserving unrelated replies', async () => {
     const h = harness();
     const close = beginQuietScheduledOutput('check', 'check-run');
@@ -712,6 +758,80 @@ describe('production Session event pipeline', () => {
     },
   );
 
+  it('holds the error row while a provider group switches computers instead of writing it', async () => {
+    const h = harness();
+    const stashProviderGroupHeldError = vi.fn(() => true);
+    (h.deps as { stashProviderGroupHeldError?: unknown }).stashProviderGroupHeldError = stashProviderGroupHeldError;
+    h.deps.agentInputCoordinatorHolder.getProviderGroupSwitchHoldId.mockReturnValue(3);
+    const agentMeta = { uuid: 'failed-turn-uuid' };
+    h.emit(event('error', { message: "You've hit your session limit", sdkError: 'rate_limit' }, { agentMeta } as Partial<AgentEvent>));
+    expect(effects.fn('reserveTurnErrorPersistId')).not.toHaveBeenCalled();
+    expect(effects.fn('onTurnErrorEvent')).not.toHaveBeenCalled();
+    // 带上失败那一轮的身份：补落时不再读当时正在进行的那一轮。
+    expect(stashProviderGroupHeldError).toHaveBeenCalledWith(
+      'task',
+      3,
+      expect.objectContaining({ message: "You've hit your session limit" }),
+      agentMeta,
+    );
+    // 补落发生在 turn 状态重置之后：先存一份 turn 开始时刻。
+    expect(effects.fn('saveTurnStartedAtForDeferred')).toHaveBeenCalledTimes(1);
+    await h.dispose();
+  });
+
+  it('writes a different error that arrives while a switch is held as usual', async () => {
+    const h = harness();
+    (h.deps as { stashProviderGroupHeldError?: unknown }).stashProviderGroupHeldError = vi.fn(() => false);
+    h.deps.agentInputCoordinatorHolder.getProviderGroupSwitchHoldId.mockReturnValue(3);
+    h.emit(event('error', { message: 'Something else broke', sdkError: 'api_error' }));
+    expect(effects.fn('onTurnErrorEvent')).toHaveBeenCalledTimes(1);
+    await h.dispose();
+  });
+
+  it('holds the Worker report to the Lead with the error row while a provider group switches computers', async () => {
+    const h = harness();
+    (h.deps as { stashProviderGroupHeldError?: unknown }).stashProviderGroupHeldError = vi.fn(() => true);
+    const stashWorker = vi.fn();
+    (h.deps as { stashProviderGroupHeldWorkerTerminal?: unknown }).stashProviderGroupHeldWorkerTerminal = stashWorker;
+    h.deps.agentInputCoordinatorHolder.getProviderGroupSwitchHoldId.mockReturnValue(3);
+    h.emit(event('error', { message: "You've hit your session limit", sdkError: 'rate_limit' }, { sessionTurnGeneration: 4 }));
+    h.deps.autoResumeBookkeeping.consumeFailedTurnCompletionTail.mockReturnValue(true);
+    h.emit(event('done', {}, { sessionTurnGeneration: 4 }));
+    await microtasks();
+    expect(stashWorker).toHaveBeenCalledOnce();
+    expect(stashWorker).toHaveBeenCalledWith('task', 3, expect.objectContaining({
+      status: 'error',
+      diagnostic: "You've hit your session limit",
+    }));
+    expect(h.deps.orcaTeamServiceForEvents.handleWorkerTerminalTurn).not.toHaveBeenCalled();
+    await h.dispose();
+  });
+
+  it('holds a failure that ends with only a done event during the switch instead of dropping it', async () => {
+    const h = harness();
+    const stashWorker = vi.fn();
+    (h.deps as { stashProviderGroupHeldWorkerTerminal?: unknown }).stashProviderGroupHeldWorkerTerminal = stashWorker;
+    h.deps.agentInputCoordinatorHolder.getProviderGroupSwitchHoldId.mockReturnValue(5);
+    h.emit(event('done', { result: '' }));
+    await microtasks();
+    expect(stashWorker).toHaveBeenCalledWith('task', 5, expect.objectContaining({ status: 'done' }));
+    expect(h.deps.orcaTeamServiceForEvents.handleWorkerTerminalTurn).not.toHaveBeenCalled();
+    await h.dispose();
+  });
+
+  it('reports the Worker terminal to the Lead as usual when no switch is held', async () => {
+    const h = harness();
+    const stashWorker = vi.fn();
+    (h.deps as { stashProviderGroupHeldWorkerTerminal?: unknown }).stashProviderGroupHeldWorkerTerminal = stashWorker;
+    h.emit(event('error', { message: 'Something else broke', sdkError: 'api_error' }));
+    await microtasks();
+    expect(stashWorker).not.toHaveBeenCalled();
+    expect(h.deps.orcaTeamServiceForEvents.handleWorkerTerminalTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'task', status: 'error' }),
+    );
+    await h.dispose();
+  });
+
   it('keeps deferred error and its paired done out of Orca terminal handling and preserves the failure seal', async () => {
     const h = harness();
     h.deps.agentInputCoordinatorHolder.isAutoResumeDeferred.mockReturnValue(true);
@@ -960,6 +1080,38 @@ describe('provider turn observer on real Session.send', () => {
       },
     };
   }
+  it('awaits channel output attachment for direct sends and releases an undispatched turn', async () => {
+    const h = harness();
+    const phases: string[] = [];
+    const dispose = installSessionTurnObserver(observerDeps(), h.session);
+    const unsubscribe = onChannelTurn(async (session, phase) => {
+      expect(session).toBe(h.session);
+      await Promise.resolve();
+      phases.push(phase);
+    });
+    try {
+      await expect(h.session.send('peer message', { beforeProviderStart: async () => {
+        expect(phases).toEqual(['starting']);
+        throw new Error('cancel before dispatch');
+      } })).rejects.toThrow('cancel before dispatch');
+      expect(phases).toEqual(['starting', 'undispatched']);
+      expect(h.handle.send).not.toHaveBeenCalled();
+      await h.session.send('automatic task');
+      expect(phases).toEqual(['starting', 'undispatched', 'starting']);
+      expect(h.handle.send).toHaveBeenCalledOnce();
+    } finally { unsubscribe(); dispose(); await h.dispose(); }
+  });
+
+  it('channel attachment failure does not block task execution', async () => {
+    const h = harness();
+    const dispose = installSessionTurnObserver(observerDeps(), h.session);
+    const unsubscribe = onChannelTurn(() => { throw new Error('channel unavailable'); });
+    try {
+      await h.session.send('automatic task');
+      expect(h.handle.send).toHaveBeenCalledOnce();
+    } finally { unsubscribe(); dispose(); await h.dispose(); }
+  });
+
   it('awaits llama.cpp readiness on an existing task before dispatch and propagates startup failure', async () => {
     const h = harness();
     const gate = deferred();
@@ -1615,6 +1767,32 @@ describe('Bot adapters in the shared event pipeline', () => {
     await microtasks();
     expect(settleLaneTurn).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'task', activeInputClientId: 'bot-group:g1:turn:bot-a', outcome: 'done', resultText: '我来补充',
+    }));
+    await h.dispose();
+  });
+
+  it.each([
+    [{ message: 'Authorization: [REDACTED]', errorStatus: 429, usageLimit: true }, 'QUOTA_EXCEEDED'],
+    [{ errorStatus: 401 }, 'AUTH_REQUIRED'],
+    [{ sdkError: 'authentication_failed' }, 'AUTH_REQUIRED'],
+    [{ sdkError: 'rate_limit', errorStatus: 429, usageLimit: true }, 'RATE_LIMITED'],
+    [{ codexErrorInfo: 'usageLimitExceeded', message: '[REDACTED]' }, 'QUOTA_EXCEEDED'],
+    [{ codexErrorInfo: 'sessionBudgetExceeded', message: '[REDACTED]' }, 'QUOTA_EXCEEDED'],
+    [{ codexErrorInfo: 'unauthorized', message: '[REDACTED]' }, 'AUTH_REQUIRED'],
+    [{ codexErrorInfo: 'responseStreamDisconnected', message: '[REDACTED]' }, 'NETWORK_ERROR'],
+    [{ reason: 'turn_no_event_timeout', message: '[REDACTED]' }, 'RUNTIME_TIMEOUT'],
+    [{ reason: 'bridge_turn_no_event_timeout', message: '[REDACTED]' }, 'RUNTIME_TIMEOUT'],
+    [{ reason: 'upstream_response_idle_timeout', message: '[REDACTED]' }, 'RUNTIME_TIMEOUT'],
+    [{ reason: 'bridge_upstream_response_idle_timeout', message: '[REDACTED]' }, 'RUNTIME_TIMEOUT'],
+  ])('settles a group terminal error with the safe category from structured signals %j', async (data, failureCode) => {
+    const h = harness();
+    const settleLaneTurn = vi.fn(async () => true);
+    (h.deps as unknown as { botGroupChatServiceHolder: unknown }).botGroupChatServiceHolder = { settleLaneTurn };
+    h.deps.agentInputCoordinatorHolder.getActiveInputClientId.mockReturnValue('bot-group:g1:turn:bot-a');
+    h.emit(event('error', { ...data, isTerminal: true }));
+    await microtasks();
+    expect(settleLaneTurn).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'task', activeInputClientId: 'bot-group:g1:turn:bot-a', outcome: 'error', failureCode,
     }));
     await h.dispose();
   });

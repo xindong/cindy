@@ -325,6 +325,7 @@ import {
 } from './mcp-integrations/piEnvironment.js';
 import { fetchRemoteMediaImageBytes } from './device-link/remoteMediaProtocol';
 import * as imageCacheStore from './imageCacheStore';
+import { readCachedImage } from './cindy-media/readCachedImage';
 import {
   collectStreamWithLimit,
   createLightboxMediaHandlers,
@@ -453,6 +454,7 @@ import {
 } from './localDb/index';
 import { createDbClient, createInprocDbClient } from './localDb/client/DbClient';
 import { createLifecycleDbClientManager } from './localDb/client/lifecycleDbClient';
+import { deliverPendingAgentAppUpdateResult } from './agent-app-update/index';
 import {
   clearCurrentDbClient,
   getCurrentDbClientUserId,
@@ -581,6 +583,9 @@ import {
 import { closeSharedTasksBeforeLogout } from './device-link/sharedTaskRuntime.js';
 import { closeSharedTasksBeforeAccountHandover } from './device-link/sharedTaskAccountBoundary.js';
 import { registerSharedTaskIpc } from './device-link/sharedTaskIpc.js';
+import { registerProviderShareIpc } from './device-link/providerShareRuntime.js';
+import { registerProviderGroupIpc } from './provider-group/ipc.js';
+import { registerProviderGroupRemoteHandler } from './provider-group/remoteRegistration.js';
 import {
   getUpdateRelaunchControllers,
   hasInFlightRemoteInvokes,
@@ -744,7 +749,10 @@ import {
   createAutomationUserTurnGitBaselineHooks,
   registerModelVisibilitySyncIpc,
   registerMakerIpc as registerMakerCoreIpc,
+  tryGetBotDelegationService,
   restoreBotRuntimeForCurrentOwner,
+  restoreOrcaRemoteWorkersForCurrentOwner,
+  stopOrcaRemoteWorkersForOwnerBoundary,
   isSessionTurnPendingCompletion,
   isSessionInTurn,
   stopOrcaIdleWatcher,
@@ -968,7 +976,7 @@ import {
   findOpenShareFileInArgv,
   setDeepLinkMainWindow,
   focusMainWindow as activateMainWindow,
-  takePendingDeepLink,
+  takePendingDeepLinkFromRenderer,
 } from './deepLink.js';
 import { createMakeTestWindowBehavior } from './cindy-make/testWindowBehavior.js';
 import { registerFolderContextMenu } from './folderContextMenu.js';
@@ -1924,6 +1932,7 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
     // 撞上它,先清再关)。
     clearDeferredCodexRestartForOwnerBoundary();
     clearWorkingDirectoryRecoveryForOwnerBoundary();
+    stopOrcaRemoteWorkersForOwnerBoundary();
     // interrupted-turn-resume:shutdown 批量 close 会话会触发 close teardown 的
     // markSessionTurnEnded,把"边界时还在飞的 turn"伪装成正常收尾 —— 被切换打断的
     // 任务从此既无中断横幅也无红点,呈现为"卡住且无报错"(与 ⌘Q 的 quit freeze 同款
@@ -2948,9 +2957,7 @@ ipcMain.on('app-locale:get-preferred-system-locale-sync', (event) => {
 // renderer 侧 MainLayout mount 后主动拉一次冷启动期间缓存的 deep link /
 // --open-folder payload。pull-on-mount 路径专用,take 一次清空,重复调安全。
 // 详见 deepLink.ts 的 pending buffer 段。
-ipcMain.handle('deep-link:take-pending', () => {
-  return takePendingDeepLink();
-});
+ipcMain.handle('deep-link:take-pending', takePendingDeepLinkFromRenderer);
 
 ipcMain.handle('app-menu:set-locale', (_event, locale: unknown): { ok: true } => {
   currentApplicationMenuLocale = resolveApplicationMenuLocale(
@@ -4313,12 +4320,18 @@ const registerIpcHandlers = () => {
   });
 
   // 系统级通知（CC Agent session 完成时弹出 / 可选飞书私聊）
+  const isCompletionHandledByTeammate = (sessionId: string): Promise<boolean> =>
+    tryGetBotDelegationService()?.isCompletionHandledByTeammate(sessionId) ?? Promise.resolve(false);
   initNotificationService({
+    isCompletionHandledByTeammate: (sessionId) => getAgentIslandService()?.waitForCompletionNotification(sessionId)
+      ?? isCompletionHandledByTeammate(sessionId),
     getWindow: () => getWindow() ?? null,
     feishuIm,
   });
   initWecomGroupNotificationIpc();
   initAgentIslandService({
+    // The relay waits for native done before checking the durable result handoff.
+    isCompletionHandledByTeammate,
     getMainWindow: () => getWindow() ?? null,
     isPlannedRemoteDaemonClose: isCcMgrUpgradeInFlight,
     onSessionActivityChange: (activity) => {
@@ -8512,14 +8525,14 @@ const registerIpcHandlers = () => {
   ipcMain.handle(
     'image-cache:read-base64',
     async (
-      _event: Electron.IpcMainInvokeEvent,
+      event: Electron.IpcMainInvokeEvent,
       params: { url: string },
     ): Promise<{ base64: string; mimeType: string }> => {
-      if (typeof params?.url === 'string' && params.url.startsWith('cindy-media://')) {
-        const { buffer, mimeType } = await cindyMediaBlobStore.readFile(params.url);
-        return { base64: buffer.toString('base64'), mimeType };
-      }
-      return imageCacheStore.readAsBase64(params.url);
+      assertTrustedAppRendererEvent(event);
+      return readCachedImage(params, {
+        readBlob: cindyMediaBlobStore.readFile,
+        readLegacy: imageCacheStore.readAsBase64,
+      });
     },
   );
 
@@ -9040,7 +9053,10 @@ app.on('ready', async () => {
       // takeover. registerMakerIpc also invokes this once its services exist,
       // covering both possible splash/login orderings without duplicate runs.
       void restoreBotRuntimeForCurrentOwner();
+      void restoreOrcaRemoteWorkersForCurrentOwner();
       startReadyWorktreeMaintenance();
+      // An Agent-approved update restarted the app: write its outcome back to the task.
+      void deliverPendingAgentAppUpdateResult();
       if (dbClientTakeover.mode === 'unchanged') {
         // 副窗口会再次走 localDb.ensureReady；同 owner 的 lifecycle client 已由首个
         // onReady 完整启动，因此这里只保留 DB 连接交接，不重复执行账号级启动维护。
@@ -9493,6 +9509,9 @@ app.on('ready', async () => {
     },
   );
   registerSharedTaskIpc(isSharedTaskAvailable, () => getDeviceLinkStatus() === 'online');
+  registerProviderShareIpc();
+  registerProviderGroupIpc();
+  registerProviderGroupRemoteHandler();
   registerFilePeerIpc();
   registerRemoteDesktopIpc(isGlobalVoiceInputOverlaySender, {
     name: getControllerName,

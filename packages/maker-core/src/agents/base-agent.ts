@@ -7,7 +7,7 @@
  * - 持有依赖注入的 deps，但具体使用由子类决定
  */
 
-import type { AutoReviewUserIntent } from './shared/auto-review-decision.js';
+import type { AutoReviewUserIntent, AutoReviewUserReferences } from './shared/auto-review-decision.js';
 import { LIBRARY_READ_ROOT } from './shared/library-native-read.js';
 import { canonicalSkillPath, isSkillDisabled } from './shared/skill-activation.js';
 
@@ -1041,6 +1041,11 @@ export interface AgentDeps {
       customContextWindow?: number;
       /** Unique app-server Host-generation identity used to scope custom-context resources. */
       customContextHostKey?: string;
+      /**
+       * 受邀者(供应商分享)任务的 app-server，值是分享给它的供应商。host 不开智能 Subagent
+       * 调配、不暴露 spawn 的模型覆写，自定义供应商路由与按模型分流也只保留这个供应商。
+       */
+      deviceHostedGuestProviderId?: string;
     },
   ) => Promise<CodexExtraSpawnConfig>;
 
@@ -1051,6 +1056,8 @@ export interface AgentDeps {
       providerId?: string;
       credentialMode?: AgentCredentialMode;
       hostPurpose?: 'control-plane' | 'review' | 'custom-context';
+      /** 受邀者任务的 app-server 不开智能 Subagent 调配(见 prepareCodexExtraSpawnConfig)。 */
+      deviceHostedGuestProviderId?: string;
     },
   ) => Promise<string>;
 
@@ -1757,7 +1764,66 @@ export interface DeviceHostedSession {
   mirrorRoot?: string;
   /** 任务所在电脑上用户的个人说明(该 Agent 的用户级说明文件)，写进给模型的环境说明。 */
   personalInstructions?: string;
+  /**
+   * 任务属于另一个账号(供应商分享的受邀者)。Agent 不加载本机的 hooks、托管技能，也不读取
+   * 会话目录之外的说明文件；本机用户自己的配置与可执行配置不进入这个会话。
+   */
+  guest?: boolean;
+  /**
+   * 受邀者专用的本机目录(远程 Agent 运行根下按控制端分开，跨任务保留，分享删除时整体清理)。
+   * Codex 的 CODEX_HOME 与 Pi 的会话目录放在这里，不与本机用户自己的历史、配置混在一起。
+   * 只在 guest 时使用；缺省时 Codex 受邀者会话按本机全局说明 fail-closed。
+   */
+  guestHome?: string;
+  /**
+   * 受邀者会话的供应商边界(只在 guest 时提供)：会话只能经分享给受邀者的这一个供应商出站。
+   *  - providerId：分享的供应商(启动与切模都钉在它上面)；
+   *  - modelIds：它为本 Agent 提供的模型(Claude Code 的可选模型只列这些)；
+   *  - routeToken：本机 proxy 认出这条会话请求的令牌(Claude Code 经请求头带上，Pi / Codex 按会话登记)。
+   * Pi / Codex 子代理与按模型分流的路由也只保留这个供应商。
+   */
+  guestProvider?: DeviceHostedGuestProvider;
+  /**
+   * 任务隧道的往来记录。托管会话里 Codex 每读一个项目文件都要过一次设备互联，慢链路下线程启动会
+   * 合法地超过关键 RPC 的固定上限(#5764)：链路上还有往来就顺延等待，超时时把这里的计数写进错误说明。
+   * 不提供时按固定上限。
+   */
+  linkActivity?: () => DeviceHostedLinkActivity;
 }
+
+/**
+ * 设备托管会话的链路往来快照(运行 Agent 的电脑上、任务隧道记下的)。只含方法名、计数与耗时，
+ * 可以写进日志与错误说明。
+ */
+export interface DeviceHostedLinkActivity {
+  /**
+   * 最近一次往来的时间(Date.now 毫秒)：Agent 发给执行环境的消息、执行环境的回复或 Cindy 工具请求；
+   * 执行环境主动推的通知(后台命令输出等)不算。还没有往来时为 null。
+   */
+  lastActivityAt: number | null;
+  /** Agent 发给执行环境(Codex exec-server)的请求数，与其中已收到回复的数量。 */
+  execRequests: number;
+  execResponses: number;
+  /** 同时在等回复的执行环境请求数的峰值。 */
+  execMaxInFlight: number;
+  /** 还在等回复的执行环境请求里最早的一个：方法名与已等时长(毫秒)。 */
+  execOldestPending?: { method: string; waitedMs: number };
+  /** 最近若干次执行环境往返的平均与最大耗时(毫秒)；还没有完成的往返时缺省。 */
+  execRoundTripAvgMs?: number;
+  execRoundTripMaxMs?: number;
+  /** 正在经隧道处理的 Cindy 工具(HTTP)请求数。 */
+  httpInFlight: number;
+}
+
+/** 受邀者会话的供应商边界，见 DeviceHostedSession.guestProvider。 */
+export interface DeviceHostedGuestProvider {
+  providerId: string;
+  modelIds: readonly string[];
+  routeToken: string;
+}
+
+/** 受邀者会话的 Claude Code 请求带上的路由令牌请求头(本机 proxy 据此只走分享的供应商)。 */
+export const DEVICE_HOSTED_GUEST_ROUTE_HEADER = 'x-cindy-guest-route';
 
 export interface StartSessionOptions {
   /**
@@ -1947,6 +2013,8 @@ export interface StartSessionOptions {
  * this proof. Main dispatchers attach it only after authenticating the source.
  */
 export const MAIN_OWNED_SEND_CONTEXT = Symbol('cindy.main-owned-send-context');
+/** Optional question replies must never be queued for a later execution. */
+export const ASYNC_QUESTION_ANSWER = Symbol('cindy.async-question-answer');
 
 /** Call-local user content before Session replaces images with generated descriptions. */
 export const AUTO_REVIEW_SOURCE_CONTENT = Symbol('cindy.auto-review-source-content');
@@ -1975,6 +2043,12 @@ export interface MainOwnedSendContext {
   readonly origin: TurnPermissionOrigin;
   /** Main-authenticated user text before channel/persona/context decoration. */
   readonly rawChannelText?: string;
+  /**
+   * Host-stamped content this channel message points at (reply/quote and attachment
+   * counts). Auto-review shows it as third-party evidence beside, never inside, the
+   * user's words; it cannot grant authority.
+   */
+  readonly autoReviewReferences?: AutoReviewUserReferences;
 }
 
 /**
@@ -1982,6 +2056,7 @@ export interface MainOwnedSendContext {
  * 缺省 / 不识别字段必须安全忽略。
  */
 export interface SendOptions {
+  readonly [ASYNC_QUESTION_ANSWER]?: true;
   readonly [AUTO_REVIEW_SOURCE_CONTENT]?: UserMessage['content'];
   readonly [AUTO_REVIEW_USER_INTENT]?: AutoReviewUserIntent;
   readonly [AUTO_REVIEW_DELEGATED_CONTINUATION]?: true;
@@ -2192,10 +2267,38 @@ export interface PiModelSwitchPreview {
   reason?: string;
 }
 
+/**
+ * What the running engine reports for one MCP server in this session.
+ * - `connected`: the engine lists tools for it (possibly none, when it says so).
+ * - `no-tools`: the engine has the server but lists no tools and no state; it
+ *   may have failed to start, still be starting, or expose no tools.
+ * - `not-mounted`: the engine has no server by that name in this session.
+ */
+export type AgentMcpServerToolsState =
+  | 'connected'
+  | 'no-tools'
+  | 'not-mounted'
+  | 'failed'
+  | 'needs-auth'
+  | 'pending'
+  | 'disabled';
+
+export interface AgentMcpServerToolsReport {
+  state: AgentMcpServerToolsState;
+  /** Raw MCP tool names as the server declared them, not harness-qualified names. */
+  tools: Array<{ name: string; description?: string }>;
+}
+
 export interface AgentSessionHandle {
   /** Canonical physical Skill identities frozen at native runtime startup. */
   readonly disabledSkillPaths?: readonly string[];
   getCodexContextWindowInfo?(): Promise<CodexContextWindowInfo | null>;
+  /**
+   * Read-only: ask the engine which tools it holds for one MCP server in this
+   * session. Never starts a server or calls its tools. Absent, or null, when
+   * the engine has no per-session MCP status entry.
+   */
+  readMcpServerTools?(serverName: string): Promise<AgentMcpServerToolsReport | null>;
   /** Native session identity safe for resume; may retain an unaccepted fork's source. */
   readonly id: string;
   /** Transient native request identity; hosts must not persist it as a resume id. */
