@@ -47,7 +47,13 @@ describe('ModelSelector:浏览别的电脑的目录时改道换位置', () => {
   });
 
   it('改道的行带上所属电脑', () => {
-    expect(selectorSource).toContain('relocate!({ ...row, agentDevice: remoteBrowseDevice })');
+    const start = selectorSource.indexOf('relocate!(');
+    expect(start).toBeGreaterThan(0);
+    const call = selectorSource.slice(start, selectorSource.indexOf('.then(', start));
+    // 默认:带上正在浏览的那台电脑。
+    expect(call).toContain('{ ...row, agentDevice: remoteBrowseDevice }');
+    // 任务归组、在组那一项里选同一供应商:留在此刻运行的那台,只换模型(provider-groups.md §10)。
+    expect(call).toContain('{ ...row, providerId: currentProviderId, agentDevice: currentAgentDevice }');
   });
 });
 
